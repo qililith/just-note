@@ -9,7 +9,7 @@ import { SyncControls } from './SyncControls'
 import { FolderPicker } from './FolderPicker'
 import { syncUi } from '../lib/syncUi'
 import type { FolderRecord, RichText } from '../lib/db'
-import { titleFromText, titleWithSuffix } from '../lib/text'
+import { titleFromText, titleWithSuffix, withLeadingTitle } from '../lib/text'
 import { beginSave, endSave, holdInput, releaseInput } from '../lib/saveState'
 import { downloadNoteExport, type NoteExportFormat } from '../lib/noteExport'
 
@@ -55,7 +55,7 @@ type Props = {
 function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveFolder, onOpenSidebar, onOpenData, onOpenConflicts, onManualSync, localError, syncError, pendingCount, syncIssueCount, hasConflict, syncing, online, lastSyncAt, isMobile, theme, onToggleTheme, onBack, onPin, onDelete }: Props & { note: EditorNote }) {
   const [fullscreen, setFullscreen] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
-  const [wordCount, setWordCount] = useState(note.plainText.length)
+  const [wordCount, setWordCount] = useState(() => withLeadingTitle(note.title, note.doc, note.plainText).plainText.length)
   const [saving, setSaving] = useState(false)
   const [externalChange, setExternalChange] = useState(false)
   const loadedSeq = useRef(note.editSeq)
@@ -126,7 +126,7 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
   const editor = useEditor({
     extensions: createEditorExtensions(),
     enablePasteRules: false,
-    content: note.doc,
+    content: withLeadingTitle(note.title, note.doc, note.plainText).doc,
     onUpdate: ({ editor: changed }) => {
       const plainText = changed.getText({ blockSeparator: '\n' })
       setWordCount(plainText.length)
@@ -162,8 +162,9 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
 
   const loadStoredVersion = useCallback(() => {
     if (!editor) return
-    editor.commands.setContent(note.doc, { emitUpdate: false })
-    setWordCount(note.plainText.length)
+    const stored = withLeadingTitle(note.title, note.doc, note.plainText)
+    editor.commands.setContent(stored.doc, { emitUpdate: false })
+    setWordCount(stored.plainText.length)
     loadedSeq.current = note.editSeq
     pendingChange.current = null
     releaseHoldIfIdle()

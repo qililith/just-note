@@ -1,3 +1,5 @@
+import type { RichText } from './db'
+
 export const MAX_TITLE_LENGTH = 255
 export const MAX_FOLDER_NAME_LENGTH = 255
 
@@ -25,4 +27,13 @@ export function checkedFolderName(name: string): string {
 export function titleWithSuffix(title: string, suffix: string): string {
   const base = title || '无标题'
   return base.length + suffix.length <= MAX_TITLE_LENGTH ? `${base}${suffix}` : base
+}
+
+export function withLeadingTitle(title: string, doc: RichText, plainText: string): { doc: RichText; plainText: string } {
+  const trimmed = title.trim()
+  if (!trimmed || trimmed === '无标题' || titleFromText(plainText) === trimmed) return { doc, plainText }
+  return {
+    doc: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: trimmed }] }, ...(doc.content ?? [])] },
+    plainText: plainText ? `${trimmed}\n${plainText}` : trimmed
+  }
 }
