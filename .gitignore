@@ -1,0 +1,15 @@
+node_modules/
+.pnpm-store/
+dist/
+coverage/
+playwright-report/
+test-results/
+.env
+.env.local
+.env.*.local
+.obsidian/
+*.tsbuildinfo
+supabase/.temp/
+supabase/.branches/
+site-preview/
+site-preview-deployment.tar.gz
