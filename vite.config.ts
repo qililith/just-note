@@ -21,12 +21,7 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: '/index.html',
-        globPatterns: ['**/*.{js,css,html,svg}'],
-        runtimeCaching: [{
-          urlPattern: ({ request }) => request.destination === 'font',
-          handler: 'CacheFirst',
-          options: { cacheName: 'fonts', expiration: { maxEntries: 300 } }
-        }]
+        globPatterns: ['**/*.{js,css,html,svg,woff2}']
       }
     })
   ],
