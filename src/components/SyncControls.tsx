@@ -1,4 +1,4 @@
-import { Cloud, CloudOff, CloudUpload, LoaderCircle, RefreshCw } from 'lucide-react'
+import { Cloud, CloudOff, CloudUpload, LoaderCircle } from 'lucide-react'
 import type { SyncKind } from '../lib/syncUi'
 
 type Props = {
@@ -20,17 +20,22 @@ function StatusIcon({ kind, size }: { kind: SyncKind; size: number }) {
 
 export function SyncControls({ label, kind, issueCount, syncing, iconOnly = false, onOpenDetails, onSync }: Props) {
   const issue = kind === 'unsaved' || kind === 'conflict' || kind === 'failed' || kind === 'external' || issueCount > 0
+  const pending = kind === 'pending' || kind === 'offline'
+  const busy = syncing || kind === 'syncing'
+  const hint = issue ? (issueCount > 0 ? `${issueCount} 项需要处理 · 点击查看` : '点击查看详情') : busy ? '' : '点击立即同步'
+  const title = hint ? `${label} · ${hint}` : label
   return (
-    <div className={`sync-controls ${iconOnly ? 'icon-only' : ''}`}>
-      <button type="button" className={`sync-status-button ${issue ? 'unsaved' : ''} kind-${kind}`} title={label} aria-label={label} onClick={onOpenDetails}>
-        <StatusIcon kind={kind} size={iconOnly ? 20 : 15} />
-        {!iconOnly && <span className="sync-status-label">{label}</span>}
-        {issueCount > 0 && <span className="sync-issue-badge" aria-label={`${issueCount} 项需要处理`}>{issueCount}</span>}
-      </button>
-      {!iconOnly && <button type="button" className="toolbar-btn sync-now-btn" title="立即同步" aria-label="立即同步" disabled={syncing} onClick={onSync}>
-        {syncing ? <LoaderCircle size={15} className="sync-spin" /> : <RefreshCw size={15} />}
-        <span>同步</span>
-      </button>}
-    </div>
+    <button
+      type="button"
+      className={`sync-button kind-${kind} ${issue ? 'has-issue' : ''} ${iconOnly ? 'icon-only' : ''}`}
+      title={title}
+      aria-label={title}
+      aria-busy={busy}
+      onClick={() => { if (issue) onOpenDetails(); else if (!busy) onSync() }}
+      onContextMenu={event => { event.preventDefault(); onOpenDetails() }}
+    >
+      <StatusIcon kind={busy ? 'syncing' : kind} size={iconOnly ? 21 : 17} />
+      {(issue || pending) && !busy && <span className={`sync-dot ${issue ? 'issue' : ''}`} aria-hidden="true" />}
+    </button>
   )
 }
