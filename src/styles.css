@@ -40,15 +40,15 @@
 
   --separator: rgba(12, 12, 9, 0.07);
 
-  --sidebar-bg: #F4F4F1;
+  --sidebar-bg: #F7F7F5;
 
   --surface: #FFFFFF;
 
   --editor-bg: #FFFFFF;
 
-  --hover-bg: #EBEBE8;
+  --hover-bg: #EFEFEC;
 
-  --selected-bg: #E6E5E0;
+  --selected-bg: #E9E8E3;
 
   --accent-color: #0C0C09;
 
@@ -102,7 +102,7 @@
 
   /* 字体 */
 
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', 'PingFang SC', 'HarmonyOS Sans SC', 'MiSans', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', 'Noto Sans CJK SC', Roboto, sans-serif;
+  --font-sans: 'Inter Variable', 'Noto Sans SC Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', 'PingFang SC', 'HarmonyOS Sans SC', 'MiSans', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', 'Noto Sans CJK SC', Roboto, sans-serif;
 
 }
 
@@ -197,6 +197,12 @@ html {
 body {
 
   font-family: var(--font-sans);
+
+  font-feature-settings: 'cv11', 'ss01';
+
+  -webkit-font-smoothing: antialiased;
+
+  text-rendering: optimizeLegibility;
 
   font-size: 15px;
 
