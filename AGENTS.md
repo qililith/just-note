@@ -1,3 +1,3 @@
 # 只是便签
 
-先读 `README.md` 和 `docs/架构.md`。界面在 `src/App.tsx` 和 `src/components/`。本地数据在 `src/lib/`。不要把旧项目的 outbox、版本锁或保存守卫加回来。
+读 [README.md](README.md)（需求与固定技术路径、文档纪律）和 [docs/进度.md](docs/进度.md)（完成度）。不要另写第三份架构说明。

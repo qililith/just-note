@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { accountDb, deleteAccountDb, emptyDocument } from '../src/lib/db'
 import { createFolder, createNote, saveNoteContent } from '../src/lib/notes'
-import { pullChanges, pushDirty, runManualSync } from '../src/lib/sync'
+import { pullChanges, pushDirty, runManualSync, runSync } from '../src/lib/sync'
 
 const userId = 'sync-test-user'
 
@@ -185,5 +185,59 @@ describe('sync engine', () => {
       rpc: async () => ({ data: null, error: null })
     })
     expect(result).toEqual({ ok: false, reason: '请先登录' })
+  })
+
+  it('runSync merges concurrent callers into one flight', async () => {
+    let pulls = 0
+    const client = mockClient({
+      pull: after => {
+        pulls += 1
+        return { items: [], next: after }
+      }
+    })
+    const [a, b] = await Promise.all([
+      runSync(userId, { silent: true }, client),
+      runSync(userId, { silent: true }, client)
+    ])
+    expect(a).toEqual({ ok: true })
+    expect(b).toEqual({ ok: true })
+    // one round = pull + push + pull → 2 pull RPCs, not 4
+    expect(pulls).toBe(2)
+  })
+
+  it('does not overwrite body while editingNoteId is focused', async () => {
+    const db = accountDb(userId)
+    const note = await createNote(db, null)
+    await saveNoteContent(db, note.id, { title: '本地', doc: emptyDocument, plainText: '正在编辑' }, 1)
+    await db.notes.update(note.id, { serverVersion: 1, dirty: 0 })
+
+    const client = mockClient({
+      pull: after => {
+        if (after !== '0') return { items: [], next: after }
+        return {
+          items: [{ seq: '5', entity: 'note', record: noteRecord(note.id, 5, '远端覆盖') }],
+          next: '5'
+        }
+      }
+    })
+
+    await pullChanges(db, client, { editingNoteId: note.id })
+    const body = await db.bodies.get(note.id)
+    const stored = await db.notes.get(note.id)
+    const conflict = await db.conflicts.get(note.id)
+    expect(body?.plainText).toBe('正在编辑')
+    expect(stored?.hasConflict).toBe(1)
+    expect(stored?.serverVersion).toBe(5)
+    expect(conflict?.plainText).toBe('远端覆盖')
+  })
+
+  it('runSync silent option still returns outcome for callers', async () => {
+    const client = mockClient({
+      pull: after => ({ items: [], next: after })
+    })
+    const silent = await runSync(userId, { silent: true }, client)
+    const loud = await runSync(userId, { silent: false }, client)
+    expect(silent).toEqual({ ok: true })
+    expect(loud).toEqual({ ok: true })
   })
 })

@@ -36,6 +36,7 @@ type Props = {
   onOpenData: () => void
   onOpenConflicts: () => void
   onManualSync: () => void
+  onEditingFocusChange?: (focused: boolean) => void
   localError: string | null
   syncError: string | null
   pendingCount: number
@@ -52,7 +53,7 @@ type Props = {
   onDelete?: () => void
 }
 
-function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveFolder, onOpenSidebar, onOpenData, onOpenConflicts, onManualSync, localError, syncError, pendingCount, syncIssueCount, hasConflict, syncing, online, lastSyncAt, isMobile, theme, onToggleTheme, onBack, onPin, onDelete }: Props & { note: EditorNote }) {
+function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveFolder, onOpenSidebar, onOpenData, onOpenConflicts, onManualSync, onEditingFocusChange, localError, syncError, pendingCount, syncIssueCount, hasConflict, syncing, online, lastSyncAt, isMobile, theme, onToggleTheme, onBack, onPin, onDelete }: Props & { note: EditorNote }) {
   const [fullscreen, setFullscreen] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const [wordCount, setWordCount] = useState(() => withLeadingTitle(note.title, note.doc, note.plainText).plainText.length)
@@ -67,6 +68,8 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
   const mounted = useRef(true)
   const onEditRef = useRef(onEdit)
   onEditRef.current = onEdit
+  const onEditingFocusChangeRef = useRef(onEditingFocusChange)
+  onEditingFocusChangeRef.current = onEditingFocusChange
   const toolbarGroupRef = useRef<HTMLDivElement>(null)
   const folderMenuRef = useRef<HTMLDetailsElement>(null)
   const [toolbarOverflow, setToolbarOverflow] = useState(false)
@@ -132,7 +135,11 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
       setWordCount(plainText.length)
       enqueue(changed.getJSON() as RichText, plainText)
     },
-    onBlur: () => { void flushRef.current() },
+    onFocus: () => { onEditingFocusChangeRef.current?.(true) },
+    onBlur: () => {
+      onEditingFocusChangeRef.current?.(false)
+      void flushRef.current()
+    },
     editorProps: {
       attributes: { class: 'editor-content', 'aria-label': '便签正文', 'data-placeholder': '开始写点什么' },
       transformPastedHTML: () => '',
@@ -187,6 +194,7 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
     window.addEventListener('pagehide', onPageHide)
     return () => {
       mounted.current = false
+      onEditingFocusChangeRef.current?.(false)
       document.removeEventListener('visibilitychange', onHidden)
       window.removeEventListener('pagehide', onPageHide)
       void flushRef.current()

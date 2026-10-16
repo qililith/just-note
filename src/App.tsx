@@ -8,7 +8,7 @@ import { createFolder, createNote, createNoteWithContent, deleteFolder, purgeExp
 import { MAX_FOLDER_NAME_LENGTH } from './lib/text'
 import { hasUnsavedWork, useSaveFlags } from './lib/saveState'
 import { demoMode, forgetUser, isAuthRejection, lastUserKey, rememberedUser, rememberUser, supabase, themeKey } from './lib/supabase'
-import { runManualSync } from './lib/sync'
+import { runSync } from './lib/sync'
 import { formatSyncClock, rememberLastSync, rememberedLastSync, syncUi } from './lib/syncUi'
 import { SettingsPanel } from './components/SettingsPanel'
 import { SyncControls } from './components/SyncControls'
@@ -79,6 +79,7 @@ function NotesWorkspace({ account, onLogout, sessionEnded, onDiscardDraft }: { a
   const [conflictDialogOpen, setConflictDialogOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [syncError, setSyncError] = useState<string | null>(null)
   const [online, setOnline] = useState(() => navigator.onLine)
   const [lastSyncAt, setLastSyncAt] = useState(() => rememberedLastSync())
   const [creatingNote, setCreatingNote] = useState(false)
@@ -89,6 +90,11 @@ function NotesWorkspace({ account, onLogout, sessionEnded, onDiscardDraft }: { a
   const activeMobileLayer = useRef<'list' | 'editor' | 'settings' | 'panel' | 'conflicts'>('list')
   const noteIdRef = useRef(noteId)
   noteIdRef.current = noteId
+  const editorFocusedRef = useRef(false)
+  const idleSyncTimer = useRef<number | undefined>(undefined)
+  const visibilitySyncTimer = useRef<number | undefined>(undefined)
+  const periodicSyncTimer = useRef<number | undefined>(undefined)
+  const prevDirtyStampRef = useRef('')
 
   const canLeaveEditor = useCallback(() => {
     if (hasUnsavedDraft) { toast.error('当前便签尚未保存，请先重新保存或另存为新便签'); return false }
@@ -152,7 +158,6 @@ function NotesWorkspace({ account, onLogout, sessionEnded, onDiscardDraft }: { a
   const body = useLiveQuery(() => noteId ? db.bodies.get(noteId) : undefined, [db, noteId])
   const conflictCount = useLiveQuery(() => db.conflicts.count(), [db], 0) ?? 0
   const pendingCount = notes.filter(note => note.dirty).length + folders.filter(folder => folder.dirty).length
-  const syncError: string | null = null
   const selectedNote = notes.find(note => note.id === noteId) ?? null
   const keepDeletedOpen = hasUnsavedDraft || saveFlags.pending || saveFlags.held
   const currentRow = selectedNote && (!selectedNote.deletedAt || keepDeletedOpen) ? selectedNote : null
@@ -205,19 +210,132 @@ function NotesWorkspace({ account, onLogout, sessionEnded, onDiscardDraft }: { a
     }
   }, [])
 
-  const manualSync = useCallback(async () => {
+  const canAutoSync = !demoMode && !sessionEnded && Boolean(supabase)
+
+  const performSync = useCallback(async (silent: boolean) => {
+    if (demoMode || !supabase) {
+      if (!silent) toast.error(demoMode ? '演示模式不同步云端' : '尚未配置云端服务')
+      return
+    }
+    if (!navigator.onLine) {
+      if (!silent) toast.error('当前离线')
+      return
+    }
     setSyncing(true)
     try {
-      const result = await runManualSync(account.id)
+      const focusedId = editorFocusedRef.current ? noteIdRef.current : null
+      const result = await runSync(account.id, {
+        silent,
+        waitForLock: !silent,
+        editingNoteId: focusedId
+      })
       if (result.ok) {
         const now = new Date()
         rememberLastSync(now)
         setLastSyncAt(now.toISOString())
-        toast.success(`同步成功（${formatSyncClock(now)}）`)
-      } else toast.error(result.reason)
-    } finally { setSyncing(false) }
+        setSyncError(null)
+        if (!silent) toast.success(`同步成功（${formatSyncClock(now)}）`)
+        return
+      }
+      if (result.skipped) return
+      if (silent) setSyncError(result.reason)
+      else toast.error(result.reason === '同步失败' ? '同步失败' : result.reason)
+    } finally {
+      setSyncing(false)
+    }
   }, [account.id])
-  const status = syncUi({ pendingCount, conflictCount, syncing, online, lastSyncAt })
+
+  const scheduleIdleSync = useCallback(() => {
+    if (!canAutoSync) return
+    window.clearTimeout(idleSyncTimer.current)
+    idleSyncTimer.current = window.setTimeout(() => {
+      if (!navigator.onLine || document.visibilityState !== 'visible') return
+      void performSync(true)
+    }, 3000)
+  }, [canAutoSync, performSync])
+
+  const manualSync = useCallback(() => { void performSync(false) }, [performSync])
+
+  useEffect(() => {
+    if (!canAutoSync || !online) return
+    void performSync(true)
+  }, [account.id, canAutoSync]) // eslint-disable-line react-hooks/exhaustive-deps -- cold start once per account
+
+  useEffect(() => {
+    if (!canAutoSync) return
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') {
+        window.clearTimeout(visibilitySyncTimer.current)
+        return
+      }
+      window.clearTimeout(visibilitySyncTimer.current)
+      visibilitySyncTimer.current = window.setTimeout(() => {
+        if (!navigator.onLine) return
+        void performSync(true)
+      }, 1000)
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.clearTimeout(visibilitySyncTimer.current)
+    }
+  }, [canAutoSync, performSync])
+
+  useEffect(() => {
+    if (!canAutoSync) return
+    const onOnline = () => { void performSync(true) }
+    window.addEventListener('online', onOnline)
+    return () => window.removeEventListener('online', onOnline)
+  }, [canAutoSync, performSync])
+
+  const dirtyStamp = useMemo(() => {
+    const notePart = notes.filter(note => note.dirty).map(note => `${note.id}:${note.updatedAt}`).sort().join(',')
+    const folderPart = folders.filter(folder => folder.dirty).map(folder => `${folder.id}:${folder.updatedAt}`).sort().join(',')
+    return `${notePart}|${folderPart}`
+  }, [notes, folders])
+
+  useEffect(() => {
+    if (!canAutoSync) return
+    if (!dirtyStamp || dirtyStamp === '|') {
+      prevDirtyStampRef.current = dirtyStamp
+      return
+    }
+    if (dirtyStamp !== prevDirtyStampRef.current) scheduleIdleSync()
+    prevDirtyStampRef.current = dirtyStamp
+  }, [dirtyStamp, canAutoSync, scheduleIdleSync])
+
+  useEffect(() => {
+    if (!canAutoSync || !online) {
+      window.clearInterval(periodicSyncTimer.current)
+      return
+    }
+    const arm = () => {
+      window.clearInterval(periodicSyncTimer.current)
+      if (document.visibilityState !== 'visible') return
+      periodicSyncTimer.current = window.setInterval(() => {
+        if (!navigator.onLine || document.visibilityState !== 'visible') return
+        void performSync(true)
+      }, 60_000)
+    }
+    arm()
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') arm()
+      else window.clearInterval(periodicSyncTimer.current)
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.clearInterval(periodicSyncTimer.current)
+    }
+  }, [canAutoSync, online, performSync])
+
+  useEffect(() => () => {
+    window.clearTimeout(idleSyncTimer.current)
+    window.clearTimeout(visibilitySyncTimer.current)
+    window.clearInterval(periodicSyncTimer.current)
+  }, [])
+
+  const status = syncUi({ pendingCount, conflictCount, syncing, online, lastSyncAt, syncError: Boolean(syncError) })
   const openData = () => { if (!sessionEnded) setDataPanelOpen(true) }
   const openConflicts = () => { if (!sessionEnded) setConflictDialogOpen(true) }
 
@@ -345,10 +463,10 @@ function NotesWorkspace({ account, onLogout, sessionEnded, onDiscardDraft }: { a
         </div>
       </aside>
       {isMobile && mobileView === 'list' && <div className="mobile-note-list-container"><NoteList {...listProps} isMobile listStyle={listStyle} /></div>}
-      {(!isMobile || mobileView === 'editor' || sessionEnded) && <main className={`app-editor ${isMobile ? 'mobile-active' : ''}`}>{settingsOpen && !isMobile && !sessionEnded ? <SettingsPanel userId={account.id} currentFolderId={folderId === trashId ? undefined : folderId} isMobile={false} listStyle={listStyle} onListStyleChange={setListStyle} theme={theme} onThemeChange={setTheme} pendingCount={pendingCount} conflictCount={conflictCount} onClose={() => setSettingsOpen(false)} onOpenSync={() => setDataPanelOpen(true)} hasSyncIssue={conflictCount > 0} syncStatus={status.label} onLogout={async () => { if (!canLeaveEditor()) return; setSettingsOpen(false); await onLogout() }} onCleared={onLogout} /> : creatingNote ? <div className="editor-empty">正在新建便签…</div> : currentNote ? <Suspense fallback={<div className="editor-empty">加载编辑器…</div>}><NoteEditor onBack={() => { if (canLeaveEditor()) setMobileView('list') }} onPin={() => togglePin(currentNote)} onDelete={() => { if (!canLeaveEditor()) return; void act(async () => { await updateNoteMeta(db, currentNote.id, { deletedAt: new Date().toISOString() }); setNoteId(null); setMobileView('list') }, '已移入回收站') }} note={currentNote} folders={activeFolders} onEdit={editNote} onSaveCopy={saveCopy} onDiscardError={() => setLocalError(null)} onMoveFolder={destination => { if (!canLeaveEditor()) return; void act(() => updateNoteMeta(db, currentNote.id, { folderId: destination }), '已移动') }} onOpenSidebar={!isMobile && !desktopSidebarOpen ? () => setDesktopSidebarOpen(true) : undefined} onOpenData={openData} onOpenConflicts={openConflicts} onManualSync={() => void manualSync()} localError={localError?.noteId === currentNote.id ? localError.message : null} syncError={syncError} pendingCount={pendingCount} syncIssueCount={conflictCount} hasConflict={currentNote.hasConflict === 1} syncing={syncing} online={online} lastSyncAt={lastSyncAt} isMobile={isMobile} theme={theme} onToggleTheme={() => setTheme(current => current === 'light' ? 'dark' : 'light')} /></Suspense> : currentRow ? <div className="editor-empty">加载编辑器…</div> : <div className="editor-empty"><div className="empty-editor-toolbar">{!isMobile && !desktopSidebarOpen && <button type="button" className="toolbar-btn" title="展开侧栏" aria-label="展开侧栏" onClick={() => setDesktopSidebarOpen(true)}><PanelLeftOpen size={18} /></button>}<div className="toolbar-spacer" /><SyncControls label={status.label} kind={status.kind} issueCount={conflictCount} syncing={syncing} onOpenDetails={conflictCount ? openConflicts : openData} onSync={() => void manualSync()} /><button type="button" className="toolbar-btn editor-theme-toggle" aria-label="切换主题" title="切换主题" onClick={() => setTheme(current => current === 'light' ? 'dark' : 'light')}>{theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}</button></div><div className="editor-empty-content"><p>选择或创建一个便签开始编辑</p></div></div>}</main>}
+      {(!isMobile || mobileView === 'editor' || sessionEnded) && <main className={`app-editor ${isMobile ? 'mobile-active' : ''}`}>{settingsOpen && !isMobile && !sessionEnded ? <SettingsPanel userId={account.id} currentFolderId={folderId === trashId ? undefined : folderId} isMobile={false} listStyle={listStyle} onListStyleChange={setListStyle} theme={theme} onThemeChange={setTheme} pendingCount={pendingCount} conflictCount={conflictCount} onClose={() => setSettingsOpen(false)} onOpenSync={() => setDataPanelOpen(true)} hasSyncIssue={conflictCount > 0} syncStatus={status.label} onLogout={async () => { if (!canLeaveEditor()) return; setSettingsOpen(false); await onLogout() }} onCleared={onLogout} /> : creatingNote ? <div className="editor-empty">正在新建便签…</div> : currentNote ? <Suspense fallback={<div className="editor-empty">加载编辑器…</div>}><NoteEditor onBack={() => { if (canLeaveEditor()) setMobileView('list') }} onPin={() => togglePin(currentNote)} onDelete={() => { if (!canLeaveEditor()) return; void act(async () => { await updateNoteMeta(db, currentNote.id, { deletedAt: new Date().toISOString() }); setNoteId(null); setMobileView('list') }, '已移入回收站') }} note={currentNote} folders={activeFolders} onEdit={editNote} onSaveCopy={saveCopy} onDiscardError={() => setLocalError(null)} onMoveFolder={destination => { if (!canLeaveEditor()) return; void act(() => updateNoteMeta(db, currentNote.id, { folderId: destination }), '已移动') }} onOpenSidebar={!isMobile && !desktopSidebarOpen ? () => setDesktopSidebarOpen(true) : undefined} onOpenData={openData} onOpenConflicts={openConflicts} onManualSync={manualSync} onEditingFocusChange={focused => { editorFocusedRef.current = focused }} localError={localError?.noteId === currentNote.id ? localError.message : null} syncError={syncError} pendingCount={pendingCount} syncIssueCount={conflictCount} hasConflict={currentNote.hasConflict === 1} syncing={syncing} online={online} lastSyncAt={lastSyncAt} isMobile={isMobile} theme={theme} onToggleTheme={() => setTheme(current => current === 'light' ? 'dark' : 'light')} /></Suspense> : currentRow ? <div className="editor-empty">加载编辑器…</div> : <div className="editor-empty"><div className="empty-editor-toolbar">{!isMobile && !desktopSidebarOpen && <button type="button" className="toolbar-btn" title="展开侧栏" aria-label="展开侧栏" onClick={() => setDesktopSidebarOpen(true)}><PanelLeftOpen size={18} /></button>}<div className="toolbar-spacer" /><SyncControls label={status.label} kind={status.kind} issueCount={conflictCount} syncing={syncing} onOpenDetails={conflictCount ? openConflicts : openData} onSync={manualSync} /><button type="button" className="toolbar-btn editor-theme-toggle" aria-label="切换主题" title="切换主题" onClick={() => setTheme(current => current === 'light' ? 'dark' : 'light')}>{theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}</button></div><div className="editor-empty-content"><p>选择或创建一个便签开始编辑</p></div></div>}</main>}
     </div>
     {settingsOpen && isMobile && !sessionEnded && <SettingsPanel userId={account.id} currentFolderId={folderId === trashId ? undefined : folderId} isMobile listStyle={listStyle} onListStyleChange={setListStyle} theme={theme} onThemeChange={setTheme} pendingCount={pendingCount} conflictCount={conflictCount} onClose={() => setSettingsOpen(false)} onOpenSync={() => { setSettingsOpen(false); setDataPanelOpen(true) }} hasSyncIssue={conflictCount > 0} syncStatus={status.label} onLogout={async () => { if (!canLeaveEditor()) return; setSettingsOpen(false); await onLogout() }} onCleared={onLogout} />}
-    {dataPanelOpen && !sessionEnded && <Suspense fallback={null}><DataPanel lastSyncLabel={status.label} syncing={syncing} pendingCount={pendingCount} conflictCount={conflictCount} onManualSync={() => void manualSync()} onOpenConflicts={() => { setDataPanelOpen(false); openConflicts() }} onClose={() => setDataPanelOpen(false)} /></Suspense>}
+    {dataPanelOpen && !sessionEnded && <Suspense fallback={null}><DataPanel lastSyncLabel={status.label} syncing={syncing} pendingCount={pendingCount} conflictCount={conflictCount} onManualSync={manualSync} onOpenConflicts={() => { setDataPanelOpen(false); openConflicts() }} onClose={() => setDataPanelOpen(false)} /></Suspense>}
     {conflictDialogOpen && !sessionEnded && <Suspense fallback={null}><ConflictDialog userId={account.id} activeNoteId={noteId} onClose={() => setConflictDialogOpen(false)} /></Suspense>}
   </div>
 }
