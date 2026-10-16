@@ -208,15 +208,15 @@ function NotesWorkspace({ account, onLogout, sessionEnded, onDiscardDraft }: { a
   const manualSync = useCallback(async () => {
     setSyncing(true)
     try {
-      const ok = await runManualSync()
-      if (ok) {
+      const result = await runManualSync(account.id)
+      if (result.ok) {
         const now = new Date()
         rememberLastSync(now)
         setLastSyncAt(now.toISOString())
         toast.success(`同步成功（${formatSyncClock(now)}）`)
-      } else toast.error('同步失败')
+      } else toast.error(result.reason)
     } finally { setSyncing(false) }
-  }, [])
+  }, [account.id])
   const status = syncUi({ pendingCount, conflictCount, syncing, online, lastSyncAt })
   const openData = () => { if (!sessionEnded) setDataPanelOpen(true) }
   const openConflicts = () => { if (!sessionEnded) setConflictDialogOpen(true) }
