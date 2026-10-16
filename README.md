@@ -53,6 +53,26 @@ Production 环境变量（**不要**填 service_role）：
 
 旧站 `sticky-notes-local-first.pages.dev` 在迁移验证通过前先保留。
 
+## 安卓（Capacitor）
+
+应用 ID：`com.justnote`。工程目录：`android/`。
+
+```powershell
+pnpm build
+pnpm exec cap sync android
+```
+
+打 debug 包需要本机安装 **JDK 17+** 和 **Android SDK**（或 Android Studio），然后：
+
+```powershell
+cd android
+.\gradlew.bat assembleDebug
+```
+
+产物：`android/app/build/outputs/apk/debug/app-debug.apk`。
+
+也可用 Android Studio 打开 `android/` 后 Run。
+
 ## 检查
 
 ```powershell
