@@ -63,8 +63,8 @@
 - 云端：Supabase；RPC **`pull_changes`**（按游标分页拉变更）、**`apply_mutation`**（带 `mutation_id` 幂等写入）。客户端在 `meta` 中为每条脏实体保留稳定 mutation id，成功后清除。
 - 一轮同步顺序：`pull` → 推送所有 `dirty` 的 folders 再 notes → 再 `pull`。
 - 拉到文件夹：以云端为准，写本地并清 dirty。
-- 拉到便签：无本地或本地不脏 → 套用云端；本地脏且与云端不同 → 云端版写入 `conflicts`，本地正文保留，`hasConflict=1`，并更新 `serverVersion` 以便下次以正确 base 上传。
-- 推送冲突：便签进冲突流程；文件夹套用云端结果。
+- 拉到便签：无本地或本地不脏 → 套用云端；本地脏或正在编辑且与云端**正文/夹/置顶/删除**实质不同 → 云端版写入 `conflicts`，本地正文保留，`hasConflict=1`，并更新 `serverVersion`。若与本地实质相同（含自己刚上传的回声），只更新版本与清 dirty，**不**抬 `editSeq`、**不**造冲突，避免编辑中误报「其它窗口已更新」。
+- 推送成功回写：内容相同时不抬 `editSeq`；推送冲突且内容实质不同才进冲突流程；文件夹套用云端结果。
 - **自动触发（Must，须全部接上）：** 启动成功并已登录后；`visibility` 变为 visible；`online`；停止编辑约 **3s**；前台约每 **60s**；以及手动按钮。同一浏览器同一时刻只跑一个同步任务（多标签互斥，例如 Web Locks 或 `meta` 租约）。
 - **反馈：** 自动失败静默（只改图标）；手动成功/失败用短 toast。PC 状态短文案+图标；手机主界面以图标为主。
 - 实现入口：`src/lib/sync.ts`（引擎）、`src/App.tsx` / 编辑器（触发与 flush）、`SyncControls`（手动与状态）、`ConflictDialog`（三选）。

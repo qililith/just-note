@@ -181,10 +181,17 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
   useEffect(() => {
     if (!editor) return
     if (note.editSeq === loadedSeq.current) { setExternalChange(false); return }
+    // Same visible text as the store: treat as echo (own sync ack), not「其它窗口已更新」.
+    const editorText = editor.getText({ blockSeparator: '\n' })
+    if (!pendingChange.current && !localError && editorText === note.plainText) {
+      loadedSeq.current = note.editSeq
+      setExternalChange(false)
+      return
+    }
     if (saving || pendingChange.current || localError || editor.isFocused) { setExternalChange(true); return }
     loadStoredVersion()
     onDiscardError()
-  }, [editor, note.editSeq, saving, localError, loadStoredVersion, onDiscardError])
+  }, [editor, note.editSeq, note.plainText, saving, localError, loadStoredVersion, onDiscardError])
 
   useEffect(() => {
     mounted.current = true

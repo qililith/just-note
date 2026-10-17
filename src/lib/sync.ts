@@ -144,14 +144,27 @@ async function applyRemoteFolder(db: NoteDatabase, remote: CloudFolder) {
   await clearMutationId(db, 'folder', remote.id)
 }
 
-async function applyRemoteNote(db: NoteDatabase, remote: CloudNote) {
+function sameNoteContent(local: NoteRecord, plainText: string, remote: CloudNote) {
+  return plainText === (remote.plain_text ?? '')
+    && (local.folderId ?? null) === (remote.folder_id ?? null)
+    && Boolean(local.isPinned) === Boolean(remote.is_pinned)
+    && (local.deletedAt ?? null) === (remote.deleted_at ?? null)
+}
+
+type ApplyNoteOptions = {
+  /** When false, keep editSeq so a focused editor does not treat echo as「其它窗口已更新」. */
+  bumpEditSeq?: boolean
+}
+
+async function applyRemoteNote(db: NoteDatabase, remote: CloudNote, options: ApplyNoteOptions = {}) {
+  const bumpEditSeq = options.bumpEditSeq !== false
   const version = asVersion(remote.version)
   const plainText = remote.plain_text ?? ''
   const title = remote.title || titleFromText(plainText)
   const summary = summaryFromText(plainText)
   await db.transaction('rw', db.notes, db.bodies, db.conflicts, async () => {
     const existing = await db.notes.get(remote.id)
-    const editSeq = (existing?.editSeq ?? 0) + 1
+    const editSeq = bumpEditSeq ? (existing?.editSeq ?? 0) + 1 : (existing?.editSeq ?? 0)
     const note: NoteRecord = {
       id: remote.id,
       title,
@@ -186,6 +199,12 @@ async function assimilateChange(db: NoteDatabase, item: PullItem, ctx: PullConte
     return
   }
   if (version <= local.serverVersion) return
+  const body = await db.bodies.get(remote.id)
+  // Echo of our own upload (or identical remote): adopt metadata without conflict / editSeq bump.
+  if (body && sameNoteContent(local, body.plainText, remote)) {
+    await applyRemoteNote(db, remote, { bumpEditSeq: false })
+    return
+  }
   if (ctx.editingNoteId === remote.id || local.dirty) {
     await keepRemoteNoteConflict(db, local, remote)
     return
@@ -236,13 +255,19 @@ async function pushNote(db: NoteDatabase, client: SyncRpc, note: NoteRecord) {
   })
   const remote = result.record as CloudNote | null
   if (result.status === 'ok' && remote) {
-    await applyRemoteNote(db, remote)
+    // Own ack: do not bump editSeq when content matches — focused editor must not flash「其它窗口已更新」.
+    const bumpEditSeq = !sameNoteContent(note, body.plainText, remote)
+    await applyRemoteNote(db, remote, { bumpEditSeq })
     if (result.seq) await writeCursor(db, result.seq)
     return
   }
   if (remote) {
-    await keepRemoteNoteConflict(db, note, remote)
-    await clearMutationId(db, 'note', note.id)
+    if (sameNoteContent(note, body.plainText, remote)) {
+      await applyRemoteNote(db, remote, { bumpEditSeq: false })
+    } else {
+      await keepRemoteNoteConflict(db, note, remote)
+      await clearMutationId(db, 'note', note.id)
+    }
     return
   }
   await clearMutationId(db, 'note', note.id)

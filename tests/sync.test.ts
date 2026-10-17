@@ -231,6 +231,55 @@ describe('sync engine', () => {
     expect(conflict?.plainText).toBe('远端覆盖')
   })
 
+  it('does not invent a conflict when focused echo matches local content', async () => {
+    const db = accountDb(userId)
+    const note = await createNote(db, null)
+    await saveNoteContent(db, note.id, { title: '本地', doc: emptyDocument, plainText: '同一段字' }, 1)
+    const before = await db.notes.get(note.id)
+    await db.notes.update(note.id, { serverVersion: 1, dirty: 0 })
+
+    const client = mockClient({
+      pull: after => {
+        if (after !== '0') return { items: [], next: after }
+        return {
+          items: [{ seq: '6', entity: 'note', record: noteRecord(note.id, 6, '同一段字') }],
+          next: '6'
+        }
+      }
+    })
+
+    await pullChanges(db, client, { editingNoteId: note.id })
+    const stored = await db.notes.get(note.id)
+    const conflict = await db.conflicts.get(note.id)
+    expect(stored?.hasConflict).toBe(0)
+    expect(stored?.dirty).toBe(0)
+    expect(stored?.serverVersion).toBe(6)
+    expect(stored?.editSeq).toBe(before?.editSeq)
+    expect(conflict).toBeUndefined()
+  })
+
+  it('push success ack does not bump editSeq when content matches', async () => {
+    const db = accountDb(userId)
+    const note = await createNote(db, null)
+    await saveNoteContent(db, note.id, { title: '本地', doc: emptyDocument, plainText: '刚写的' }, 1)
+    const before = await db.notes.get(note.id)
+    const client = mockClient({
+      pull: after => ({ items: [], next: after }),
+      apply: args => ({
+        status: 'ok' as const,
+        record: noteRecord(String(args.p_entity_id), 1, '刚写的'),
+        seq: '1'
+      })
+    })
+
+    await pushDirty(db, client)
+    const stored = await db.notes.get(note.id)
+    expect(stored?.dirty).toBe(0)
+    expect(stored?.serverVersion).toBe(1)
+    expect(stored?.editSeq).toBe(before?.editSeq)
+    expect(stored?.hasConflict).toBe(0)
+  })
+
   it('runSync silent option still returns outcome for callers', async () => {
     const client = mockClient({
       pull: after => ({ items: [], next: after })
