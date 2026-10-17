@@ -124,7 +124,9 @@ async function keepRemoteNoteConflict(db: NoteDatabase, note: NoteRecord, remote
     const current = await db.notes.get(note.id)
     if (!current) return
     await db.conflicts.put(snapshot)
-    await db.notes.put({ ...current, serverVersion: version, hasConflict: 1, editSeq: current.editSeq + 1 })
+    // Do not bump editSeq: hasConflict alone drives「处理冲突」. Bumping while focused
+    // falsely triggers「其它窗口已更新 / 加载新版本」even for echo conflicts.
+    await db.notes.put({ ...current, serverVersion: version, hasConflict: 1 })
   })
 }
 
@@ -144,8 +146,12 @@ async function applyRemoteFolder(db: NoteDatabase, remote: CloudFolder) {
   await clearMutationId(db, 'folder', remote.id)
 }
 
+function normalizePlain(text: string) {
+  return text.replace(/\r\n/g, '\n').trimEnd()
+}
+
 function sameNoteContent(local: NoteRecord, plainText: string, remote: CloudNote) {
-  return plainText === (remote.plain_text ?? '')
+  return normalizePlain(plainText) === normalizePlain(remote.plain_text ?? '')
     && (local.folderId ?? null) === (remote.folder_id ?? null)
     && Boolean(local.isPinned) === Boolean(remote.is_pinned)
     && (local.deletedAt ?? null) === (remote.deleted_at ?? null)
@@ -255,9 +261,16 @@ async function pushNote(db: NoteDatabase, client: SyncRpc, note: NoteRecord) {
   })
   const remote = result.record as CloudNote | null
   if (result.status === 'ok' && remote) {
-    // Own ack: do not bump editSeq when content matches — focused editor must not flash「其它窗口已更新」.
-    const bumpEditSeq = !sameNoteContent(note, body.plainText, remote)
-    await applyRemoteNote(db, remote, { bumpEditSeq })
+    const latest = await db.notes.get(note.id)
+    // User kept typing while this push was in flight: keep newer local body/dirty, only advance version.
+    if (latest && latest.editSeq > note.editSeq) {
+      await db.notes.update(note.id, { serverVersion: asVersion(remote.version) })
+      await clearMutationId(db, 'note', note.id)
+      if (result.seq) await writeCursor(db, result.seq)
+      return
+    }
+    // Own push ack never bumps editSeq — server echo must not look like「其它窗口已更新」.
+    await applyRemoteNote(db, remote, { bumpEditSeq: false })
     if (result.seq) await writeCursor(db, result.seq)
     return
   }

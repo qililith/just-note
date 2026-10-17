@@ -221,6 +221,7 @@ describe('sync engine', () => {
       }
     })
 
+    const beforeSeq = (await db.notes.get(note.id))?.editSeq
     await pullChanges(db, client, { editingNoteId: note.id })
     const body = await db.bodies.get(note.id)
     const stored = await db.notes.get(note.id)
@@ -228,6 +229,7 @@ describe('sync engine', () => {
     expect(body?.plainText).toBe('正在编辑')
     expect(stored?.hasConflict).toBe(1)
     expect(stored?.serverVersion).toBe(5)
+    expect(stored?.editSeq).toBe(beforeSeq)
     expect(conflict?.plainText).toBe('远端覆盖')
   })
 
@@ -258,7 +260,7 @@ describe('sync engine', () => {
     expect(conflict).toBeUndefined()
   })
 
-  it('push success ack does not bump editSeq when content matches', async () => {
+  it('push success ack never bumps editSeq', async () => {
     const db = accountDb(userId)
     const note = await createNote(db, null)
     await saveNoteContent(db, note.id, { title: '本地', doc: emptyDocument, plainText: '刚写的' }, 1)
@@ -267,7 +269,8 @@ describe('sync engine', () => {
       pull: after => ({ items: [], next: after }),
       apply: args => ({
         status: 'ok' as const,
-        record: noteRecord(String(args.p_entity_id), 1, '刚写的'),
+        // Server may normalize trailing whitespace; ack still must not bump editSeq.
+        record: noteRecord(String(args.p_entity_id), 1, '刚写的\n'),
         seq: '1'
       })
     })
@@ -278,6 +281,30 @@ describe('sync engine', () => {
     expect(stored?.serverVersion).toBe(1)
     expect(stored?.editSeq).toBe(before?.editSeq)
     expect(stored?.hasConflict).toBe(0)
+  })
+
+  it('treats trailing newline differences as the same content while focused', async () => {
+    const db = accountDb(userId)
+    const note = await createNote(db, null)
+    await saveNoteContent(db, note.id, { title: '本地', doc: emptyDocument, plainText: '同一段字' }, 1)
+    const before = await db.notes.get(note.id)
+    await db.notes.update(note.id, { serverVersion: 1, dirty: 0 })
+
+    const client = mockClient({
+      pull: after => {
+        if (after !== '0') return { items: [], next: after }
+        return {
+          items: [{ seq: '7', entity: 'note', record: noteRecord(note.id, 7, '同一段字\n') }],
+          next: '7'
+        }
+      }
+    })
+
+    await pullChanges(db, client, { editingNoteId: note.id })
+    const stored = await db.notes.get(note.id)
+    expect(stored?.hasConflict).toBe(0)
+    expect(stored?.editSeq).toBe(before?.editSeq)
+    expect(await db.conflicts.get(note.id)).toBeUndefined()
   })
 
   it('runSync silent option still returns outcome for callers', async () => {

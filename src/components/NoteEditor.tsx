@@ -181,9 +181,10 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
   useEffect(() => {
     if (!editor) return
     if (note.editSeq === loadedSeq.current) { setExternalChange(false); return }
-    // Same visible text as the store: treat as echo (own sync ack), not「其它窗口已更新」.
+    const normalize = (text: string) => text.replace(/\r\n/g, '\n').trimEnd()
     const editorText = editor.getText({ blockSeparator: '\n' })
-    if (!pendingChange.current && !localError && editorText === note.plainText) {
+    // Same visible text as the store (incl. sync echo): adopt seq, never flash recovery.
+    if (!pendingChange.current && !localError && normalize(editorText) === normalize(note.plainText)) {
       loadedSeq.current = note.editSeq
       setExternalChange(false)
       return
