@@ -3052,9 +3052,7 @@ body {
 
   background: var(--bg-primary);
 
-  overflow-y: auto;
-
-  scroll-behavior: smooth;
+  overflow: hidden;
 
 }
 
@@ -3140,11 +3138,67 @@ body {
 
   
 
-/* 全屏模式下的工具栏优化 */
+/* 全屏模式 - 不显示顶部工具栏；保存或冲突恢复操作仍保留 */
 
 .editor-container.fullscreen .editor-toolbar {
 
-  padding: 0 32px;
+  display: none;
+
+}
+
+
+
+.editor-container.fullscreen .editor-toolbar:has(.recovery-btn) {
+
+  display: flex;
+
+  justify-content: flex-end;
+
+  padding: 0 56px 0 32px;
+
+}
+
+
+
+.editor-container.fullscreen .editor-toolbar:has(.recovery-btn) > :not(.recovery-btn) {
+
+  display: none;
+
+}
+
+
+
+.editor-container.fullscreen .editor-body {
+
+  min-height: 0;
+
+}
+
+
+
+.fullscreen-exit {
+
+  position: absolute;
+
+  top: 12px;
+
+  right: 16px;
+
+  z-index: 3;
+
+  color: var(--text-tertiary);
+
+  background: var(--editor-bg);
+
+}
+
+
+
+.fullscreen-exit:hover {
+
+  color: var(--accent-color);
+
+  background: var(--hover-bg);
 
 }
 

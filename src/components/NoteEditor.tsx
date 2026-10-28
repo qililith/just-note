@@ -377,6 +377,7 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
           {fullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
         </button>
       </div>}
+      {fullscreen && <button type="button" className="toolbar-btn fullscreen-exit" title="退出全屏" aria-label="退出全屏" onClick={() => setFullscreen(false)}><Minimize2 size={16} /></button>}
       <div className="editor-body">
         <EditorContent editor={editor} className="editor-content-shell" />
       </div>
