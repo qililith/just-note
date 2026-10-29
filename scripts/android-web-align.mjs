@@ -120,13 +120,21 @@ function assembleDebug({ required = true } = {}) {
       // assemble below will still fail with a clear Gradle hint
     }
   }
-  const result = spawnSync(gradlewPath, ['assembleDebug'], {
-    cwd: androidDir,
-    env: process.env,
-    stdio: 'inherit',
-    shell: isWin
-  })
+  // Prefer bash on Unix: spawnSync(scriptPath) without shell can fail quietly on Actions.
+  const result = isWin
+    ? spawnSync(gradlewPath, ['assembleDebug'], {
+        cwd: androidDir,
+        env: process.env,
+        stdio: 'inherit',
+        shell: true
+      })
+    : spawnSync('bash', [gradlewPath, 'assembleDebug'], {
+        cwd: androidDir,
+        env: process.env,
+        stdio: 'inherit'
+      })
   if (result.status !== 0) {
+    if (result.error) console.error(result.error)
     const hint =
       'Gradle 失败。请安装 JDK 21+ 并设置 JAVA_HOME，然后在 android/ 执行 gradlew assembleDebug。\n' +
       '（cap sync 若已成功，capacitor 配置已写入工程；只需补打 APK。）'
