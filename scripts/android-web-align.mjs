@@ -111,12 +111,20 @@ function syncAndroid({ live }) {
 function assembleDebug({ required = true } = {}) {
   const androidDir = path.join(root, 'android')
   const isWin = process.platform === 'win32'
-  const gradlew = isWin ? 'gradlew.bat' : './gradlew'
-  const result = spawnSync(gradlew, ['assembleDebug'], {
+  const gradlewPath = path.join(androidDir, isWin ? 'gradlew.bat' : 'gradlew')
+  // Windows checkouts often lose the +x bit; CI then gets Permission denied on ./gradlew.
+  if (!isWin) {
+    try {
+      fs.chmodSync(gradlewPath, 0o755)
+    } catch {
+      // assemble below will still fail with a clear Gradle hint
+    }
+  }
+  const result = spawnSync(gradlewPath, ['assembleDebug'], {
     cwd: androidDir,
     env: process.env,
     stdio: 'inherit',
-    shell: true
+    shell: isWin
   })
   if (result.status !== 0) {
     const hint =
