@@ -4,6 +4,13 @@ import Highlight from '@tiptap/extension-highlight'
 import TaskList from '@tiptap/extension-task-list'
 import TaskItem from '@tiptap/extension-task-item'
 
+/** Match local plainText / getText: one newline between blocks (TipTap default clipboard is `\n\n`). */
+export const editorBlockSeparator = '\n'
+
+export const editorCoreExtensionOptions = {
+  clipboardTextSerializer: { blockSeparator: editorBlockSeparator }
+}
+
 export const createEditorExtensions = () => [
   StarterKit.configure({ heading: { levels: [1, 2, 3] } }),
   Highlight,

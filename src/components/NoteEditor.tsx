@@ -5,7 +5,7 @@ import { Fragment, Slice, type Mark, type Schema } from '@tiptap/pm/model'
 import { TextSelection, type Transaction } from '@tiptap/pm/state'
 import type { EditorView } from '@tiptap/pm/view'
 import { toast } from 'sonner'
-import { createEditorExtensions } from '../lib/editor'
+import { createEditorExtensions, editorBlockSeparator, editorCoreExtensionOptions } from '../lib/editor'
 import { ArrowLeft, Bold, CheckSquare, ChevronDown, ChevronLeft, ChevronRight, Cloud, Download, FileText, FolderInput, Heading1, Heading2, Heading3, Highlighter, Italic, List, ListOrdered, Maximize2, Menu, Minimize2, Moon, PanelLeftOpen, Pin, Redo2, RefreshCw, Sun, Trash2, Type, Undo2, X } from 'lucide-react'
 import { SyncControls } from './SyncControls'
 import { FolderPicker } from './FolderPicker'
@@ -163,9 +163,10 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
   const editor = useEditor({
     extensions: createEditorExtensions(),
     enablePasteRules: false,
+    coreExtensionOptions: editorCoreExtensionOptions,
     content: withLeadingTitle(note.title, note.doc, note.plainText).doc,
     onUpdate: ({ editor: changed }) => {
-      const plainText = changed.getText({ blockSeparator: '\n' })
+      const plainText = changed.getText({ blockSeparator: editorBlockSeparator })
       setWordCount(plainText.length)
       enqueue(changed.getJSON() as RichText, plainText)
     },
@@ -228,7 +229,7 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
     if (!editor) return
     if (note.editSeq === loadedSeq.current) { setExternalChange(false); return }
     const normalize = (text: string) => text.replace(/\r\n/g, '\n').trimEnd()
-    const editorText = editor.getText({ blockSeparator: '\n' })
+    const editorText = editor.getText({ blockSeparator: editorBlockSeparator })
     // Same visible text as the store (incl. sync echo): adopt seq, never flash recovery.
     if (!pendingChange.current && !localError && normalize(editorText) === normalize(note.plainText)) {
       loadedSeq.current = note.editSeq
@@ -332,7 +333,7 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
   const exportNote = (format: NoteExportFormat) => {
     if (!editor) return
     try {
-      downloadNoteExport({ title: titleFromText(editor.getText({ blockSeparator: '\n' })), doc: editor.getJSON() as RichText }, format)
+      downloadNoteExport({ title: titleFromText(editor.getText({ blockSeparator: editorBlockSeparator })), doc: editor.getJSON() as RichText }, format)
       setMobileMenu(null)
       toast.success('下载已发起，请检查下载文件')
     } catch (cause) { toast.error(cause instanceof Error ? cause.message : '导出失败') }
@@ -395,17 +396,17 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
         {syncError && !hasConflict && <button type="button" className="toolbar-btn recovery-btn" onClick={onOpenConflicts}>查看同步问题</button>}
         {localError && !saving && <button type="button" className="toolbar-btn recovery-btn" onClick={() => {
           if (!editor) return
-          enqueue(editor.getJSON() as RichText, editor.getText({ blockSeparator: '\n' }))
+          enqueue(editor.getJSON() as RichText, editor.getText({ blockSeparator: editorBlockSeparator }))
           void flushRef.current()
         }}>重新保存</button>}
         {(localError || externalChange) && <button type="button" className="toolbar-btn recovery-btn" onClick={() => {
           if (!editor) return
-          const plainText = editor.getText({ blockSeparator: '\n' })
+          const plainText = editor.getText({ blockSeparator: editorBlockSeparator })
           void onSaveCopy({ title: titleWithSuffix(titleFromText(plainText), '（恢复副本）'), doc: editor.getJSON() as RichText, plainText })
         }}>另存为新便签</button>}
         {(localError || externalChange) && <button type="button" className="toolbar-btn recovery-btn" onClick={() => {
           if (!editor || !navigator.clipboard?.writeText) { toast.error('无法自动复制，请手动复制标题和正文'); return }
-          const draft = editor.getText({ blockSeparator: '\n' })
+          const draft = editor.getText({ blockSeparator: editorBlockSeparator })
           void navigator.clipboard.writeText(draft).then(() => toast.success('草稿文本已复制')).catch(() => toast.error('复制失败，请手动复制标题和正文'))
         }}>复制草稿文本</button>}
         {externalChange && <button type="button" className="toolbar-btn recovery-btn" onClick={() => {
