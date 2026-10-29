@@ -65,6 +65,10 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .editor-content ul[data-type="taskList"] li > div { flex: 1; min-width: 0; }
 .editor-content ul[data-type="taskList"] li > div > p { margin: 0; }
 .editor-content ul[data-type="taskList"] li[data-checked="true"] > div { color: var(--text-tertiary); text-decoration: line-through; }
+.editor-content a { color: inherit; text-decoration: underline; text-decoration-color: var(--text-tertiary); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.editor-content a:hover { text-decoration-color: var(--text-primary); }
+.editor-content hr { height: 0; margin: 22px 0; border: 0; border-top: 1px solid var(--border-color); }
+.editor-content s { text-decoration: line-through; color: var(--text-secondary); }
 .toolbar-wrapper { display: flex; align-items: center; gap: 6px; }
 .editor-container { container-type: inline-size; }
 .editor-toolbar .toolbar-group { align-items: center; min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }

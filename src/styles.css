@@ -3050,7 +3050,7 @@ body {
 
   z-index: 1000;
 
-  background: var(--bg-primary);
+  background: var(--editor-bg);
 
   overflow: hidden;
 

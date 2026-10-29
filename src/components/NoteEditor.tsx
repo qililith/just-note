@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
 import { closeHistory } from '@tiptap/pm/history'
-import { Fragment, Slice } from '@tiptap/pm/model'
+import { Fragment, Slice, type Mark, type Schema } from '@tiptap/pm/model'
+import { TextSelection, type Transaction } from '@tiptap/pm/state'
+import type { EditorView } from '@tiptap/pm/view'
 import { toast } from 'sonner'
 import { createEditorExtensions } from '../lib/editor'
 import { ArrowLeft, Bold, CheckSquare, ChevronDown, ChevronLeft, ChevronRight, Cloud, Download, FileText, FolderInput, Heading1, Heading2, Heading3, Highlighter, Italic, List, ListOrdered, Maximize2, Menu, Minimize2, Moon, PanelLeftOpen, Pin, Redo2, RefreshCw, Sun, Trash2, Type, Undo2, X } from 'lucide-react'
@@ -11,6 +13,7 @@ import { syncUi } from '../lib/syncUi'
 import type { FolderRecord, RichText } from '../lib/db'
 import { titleFromText, titleWithSuffix, withLeadingTitle } from '../lib/text'
 import { beginSave, endSave, holdInput, releaseInput } from '../lib/saveState'
+import { clipboardPrefersFile, combineMarkdownFiles, isMarkdownFile, markdownPasteSlice } from '../lib/markdownPaste'
 import { downloadNoteExport, type NoteExportFormat } from '../lib/noteExport'
 
 export type EditorNote = {
@@ -24,6 +27,37 @@ export type EditorNote = {
 }
 
 type Change = { title: string; doc: RichText; plainText: string }
+
+function plainParagraphSlice(schema: Schema, marks: readonly Mark[] | null, plain: string): Slice {
+  const paragraphs = plain.split('\n').map(line => schema.nodes.paragraph.create(null, line ? schema.text(line, marks) : undefined))
+  return Slice.maxOpen(Fragment.fromArray(paragraphs))
+}
+
+function pasteClipboardText(view: EditorView, plain: string, at?: number, forceMarkdown = false) {
+  const normalized = plain.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
+  if (!normalized) return
+  let tr: Transaction = view.state.tr
+  if (at != null) {
+    try {
+      const pos = Math.max(0, Math.min(at, tr.doc.content.size))
+      tr = tr.setSelection(TextSelection.near(tr.doc.resolve(pos)))
+    } catch { /* Keep the caret where it already is. */ }
+  }
+  if (tr.selection.$from.parent.type.spec.code) {
+    view.dispatch(closeHistory(tr).insertText(normalized).scrollIntoView())
+    view.dispatch(closeHistory(view.state.tr))
+    return
+  }
+  const marks = tr.storedMarks ?? tr.selection.$from.marks()
+  const slice = markdownPasteSlice(view.state.schema, normalized, { force: forceMarkdown }) ?? plainParagraphSlice(view.state.schema, marks, normalized)
+  view.dispatch(closeHistory(tr).replaceSelection(slice).setMeta('uiEvent', 'paste').scrollIntoView())
+  view.dispatch(closeHistory(view.state.tr))
+}
+
+async function readMarkdownFiles(files: File[]): Promise<string> {
+  const loaded = await Promise.all(files.map(async file => ({ name: file.name, text: await file.text() })))
+  return combineMarkdownFiles(loaded)
+}
 
 type Props = {
   note: EditorNote | null
@@ -144,24 +178,36 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
       attributes: { class: 'editor-content', 'aria-label': '便签正文', 'data-placeholder': '开始写点什么' },
       transformPastedHTML: () => '',
       handlePaste: (view, event) => {
-        if (!event.clipboardData) return false
-        const plain = event.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n')
+        const data = event.clipboardData
+        if (!data) return false
+        const markdownMime = data.getData('text/markdown') || data.getData('text/x-markdown')
+        const plain = data.getData('text/plain')
+        const files = [...data.files].filter(isMarkdownFile)
         event.preventDefault()
-        if (!plain) { toast.error('剪贴板没有可粘贴的纯文本'); return true }
-        const { state } = view
-        if (state.selection.$from.parent.type.spec.code) {
-          view.dispatch(closeHistory(state.tr).insertText(plain).scrollIntoView())
-          view.dispatch(closeHistory(view.state.tr))
+        if (clipboardPrefersFile(markdownMime || plain, files)) {
+          void readMarkdownFiles(files).then(text => {
+            if (!view.dom.isConnected) return
+            if (!text.trim()) { toast.error('这个 Markdown 文件是空的'); return }
+            pasteClipboardText(view, text, undefined, true)
+          }).catch(() => { if (view.dom.isConnected) toast.error('无法读取 Markdown 文件') })
           return true
         }
-        // Use the current view, not the editor reference captured during its
-        // initialization. Text nodes preserve literal HTML and empty lines.
-        const marks = state.storedMarks ?? state.selection.$from.marks()
-        const paragraphs = plain.split('\n').map(line => state.schema.nodes.paragraph.create(null,
-          line ? state.schema.text(line, marks) : undefined))
-        const slice = Slice.maxOpen(Fragment.fromArray(paragraphs))
-        view.dispatch(closeHistory(state.tr).replaceSelection(slice).setMeta('uiEvent', 'paste').scrollIntoView())
-        view.dispatch(closeHistory(view.state.tr))
+        const source = markdownMime || plain
+        if (!source.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')) { toast.error('剪贴板没有可粘贴的纯文本'); return true }
+        pasteClipboardText(view, source, undefined, Boolean(markdownMime))
+        return true
+      },
+      handleDrop: (view, event, _slice, moved) => {
+        if (moved || !event.dataTransfer) return false
+        const files = [...event.dataTransfer.files].filter(isMarkdownFile)
+        if (!files.length) return false
+        event.preventDefault()
+        const coords = view.posAtCoords({ left: event.clientX, top: event.clientY })
+        void readMarkdownFiles(files).then(text => {
+          if (!view.dom.isConnected) return
+          if (!text.trim()) { toast.error('这个 Markdown 文件是空的'); return }
+          pasteClipboardText(view, text, coords?.pos, true)
+        }).catch(() => { if (view.dom.isConnected) toast.error('无法读取 Markdown 文件') })
         return true
       }
     }

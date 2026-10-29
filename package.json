@@ -10,7 +10,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "cap:sync": "pnpm build && pnpm exec cap sync android",
-    "android:open": "pnpm exec cap open android"
+    "android:open": "pnpm exec cap open android",
+    "android:live": "node scripts/android-web-align.mjs --live",
+    "android:apk": "node scripts/android-web-align.mjs --apk",
+    "android:check": "node scripts/android-web-align.mjs --check"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
@@ -30,6 +33,7 @@
     "dexie-react-hooks": "^4.0.0",
     "fflate": "0.8.3",
     "lucide-react": "^0.563.0",
+    "marked": "^18.1.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "sonner": "^2.0.7"

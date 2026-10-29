@@ -74,6 +74,7 @@
 - 登录与会话：`src/lib/supabase.ts`；冷启动用 `rememberedUser` 先开库。
 - 搜索：内存索引，输入停顿约 150ms。
 - 安卓：Capacitor，`android/`，同一套 Web 资源；数据在应用私有存储；卸载重装后登录再全量拉取恢复。
+- **Web ↔ 安卓对齐：** 日常真机跟站用 `pnpm android:live`（WebView 加载正式站，免每次重打 APK）；要分发/离线壳用 `pnpm android:apk`（打包当前 `dist` 并校验 hash，禁止残留 live URL）。`pnpm android:check` 只做校验。CI：`master` 相关变更打 debug APK 产物（需 Secrets `VITE_SUPABASE_*`）。
 - 导出：设置/面板提供；导入与历史快照 UI 不挡主路径，进度里单列。
 
 ### 目录（实现落点）
@@ -106,4 +107,12 @@ pnpm build
 ```
 
 发版：Cloudflare Pages，分支 `master`，`pnpm install && pnpm build`，输出 `dist`，Production 配齐上述两个 `VITE_*`。  
-安卓：`pnpm cap:sync` 后 `android` 下 JDK 21+ 执行 `.\gradlew.bat assembleDebug`。
+安卓（JDK 21+）：
+
+```powershell
+pnpm android:live   # 调试壳跟 https://just-note.pages.dev（改站即生效，装一次即可）
+pnpm android:apk    # 打本地打包的 debug APK（与当前 dist 对齐）
+pnpm android:check  # 检查 android assets 是否与 dist 同包且非 live
+```
+
+仍可用 `pnpm cap:sync` 只做「构建 + sync」；分发前务必 `android:apk` / `android:check`，避免壳内还是旧 `index-*.js`。
