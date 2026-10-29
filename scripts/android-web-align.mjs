@@ -128,7 +128,7 @@ function assembleDebug({ required = true } = {}) {
         stdio: 'inherit',
         shell: true
       })
-    : spawnSync('bash', [gradlewPath, 'assembleDebug'], {
+    : spawnSync('bash', ['./gradlew', 'assembleDebug'], {
         cwd: androidDir,
         env: process.env,
         stdio: 'inherit'
