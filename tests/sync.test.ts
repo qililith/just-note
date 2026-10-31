@@ -37,18 +37,18 @@ function folderRecord(id: string, version: number, name: string, sortOrder = 0) 
 }
 
 function mockClient(handlers: {
-  pull?: (after: string) => { items: unknown[]; next: string }
-  apply?: (args: Record<string, unknown>) => { status: 'ok' | 'conflict'; record: unknown; seq?: string }
+  pull?: (after: string) => { items: unknown[]; next: string } | Promise<{ items: unknown[]; next: string }>
+  apply?: (args: Record<string, unknown>) => { status: 'ok' | 'conflict'; record: unknown; seq?: string } | Promise<{ status: 'ok' | 'conflict'; record: unknown; seq?: string }>
 }) {
   return {
     auth: { getSession: async () => ({ data: { session: { access_token: 't' } } }) },
     rpc: async (fn: string, args: Record<string, unknown>) => {
       if (fn === 'pull_changes') {
-        const page = handlers.pull?.(String(args.p_after)) ?? { items: [], next: String(args.p_after) }
+        const page = await (handlers.pull?.(String(args.p_after)) ?? { items: [], next: String(args.p_after) })
         return { data: page, error: null }
       }
       if (fn === 'apply_mutation') {
-        const result = handlers.apply?.(args) ?? { status: 'ok' as const, record: null }
+        const result = await (handlers.apply?.(args) ?? { status: 'ok' as const, record: null })
         return { data: result, error: null }
       }
       return { data: null, error: { message: `unknown rpc ${fn}` } }
@@ -315,5 +315,60 @@ describe('sync engine', () => {
     const loud = await runSync(userId, { silent: false }, client)
     expect(silent).toEqual({ ok: true })
     expect(loud).toEqual({ ok: true })
+  })
+
+  it('keeps newer local dirty when user edits during push ack (t2 race)', async () => {
+    const db = accountDb(userId)
+    const note = await createNote(db, null)
+    await saveNoteContent(db, note.id, { title: '一', doc: emptyDocument, plainText: '一' }, 1)
+    const pushed = await db.notes.get(note.id)
+    const client = mockClient({
+      pull: after => ({ items: [], next: after }),
+      apply: async args => {
+        // Simulate typing a newer revision while the RPC is in flight.
+        await saveNoteContent(db, note.id, { title: '二', doc: emptyDocument, plainText: '二' }, pushed!.editSeq)
+        return {
+          status: 'ok' as const,
+          record: noteRecord(String(args.p_entity_id), 1, '一'),
+          seq: '1'
+        }
+      }
+    })
+
+    await pushDirty(db, client)
+    const stored = await db.notes.get(note.id)
+    const body = await db.bodies.get(note.id)
+    expect(body?.plainText).toBe('二')
+    expect(stored?.dirty).toBe(1)
+    expect(stored?.serverVersion).toBe(1)
+    expect(stored?.hasConflict).toBe(0)
+  })
+
+  it('real dual-edit while focused stores conflict without bumping editSeq (t5/t6 engine)', async () => {
+    const db = accountDb(userId)
+    const note = await createNote(db, null)
+    await saveNoteContent(db, note.id, { title: '本地', doc: emptyDocument, plainText: 'A正在打' }, 1)
+    const before = await db.notes.get(note.id)
+    await db.notes.update(note.id, { serverVersion: 1, dirty: 1 })
+
+    const client = mockClient({
+      pull: after => {
+        if (after !== '0') return { items: [], next: after }
+        return {
+          items: [{ seq: '8', entity: 'note', record: noteRecord(note.id, 8, 'B已改完') }],
+          next: '8'
+        }
+      }
+    })
+
+    await pullChanges(db, client, { editingNoteId: note.id })
+    const stored = await db.notes.get(note.id)
+    const body = await db.bodies.get(note.id)
+    const conflict = await db.conflicts.get(note.id)
+    expect(body?.plainText).toBe('A正在打')
+    expect(stored?.hasConflict).toBe(1)
+    expect(stored?.dirty).toBe(1)
+    expect(stored?.editSeq).toBe(before?.editSeq)
+    expect(conflict?.plainText).toBe('B已改完')
   })
 })

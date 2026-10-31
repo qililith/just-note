@@ -1892,7 +1892,7 @@ body {
 
   font-size: 28px !important;
 
-  line-height: 1.8 !important;
+  line-height: 1.25 !important;
 
   font-weight: 600;
 
@@ -1904,7 +1904,7 @@ body {
 
   flex-shrink: 0;
 
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
 
 }
 
@@ -1936,7 +1936,7 @@ body {
 
   font-size: 16px;
 
-  line-height: 1.75;
+  line-height: 1.65;
 
   color: var(--text-body);
 
@@ -2056,7 +2056,7 @@ body {
 
   color: var(--text-primary);
 
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
 
 }
 
@@ -2098,7 +2098,7 @@ body {
 
 .editor-content p {
 
-  margin: 0 0 6px;
+  margin: 0 0 0.65em;
 
 }
 
