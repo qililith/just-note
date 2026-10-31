@@ -91,9 +91,11 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
   const [fullscreen, setFullscreen] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const [wordCount, setWordCount] = useState(() => withLeadingTitle(note.title, note.doc, note.plainText).plainText.length)
-  const [saving, setSaving] = useState(false)
   const [externalChange, setExternalChange] = useState(false)
+  const wordCountRef = useRef(wordCount)
   const loadedSeq = useRef(note.editSeq)
+  const savingRef = useRef(false)
+  const ownWrites = useRef<string[]>([])
   const pendingChange = useRef<Change | null>(null)
   const burstStart = useRef<number | null>(null)
   const saveTimer = useRef<number | undefined>(undefined)
@@ -110,8 +112,15 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
   const [toolbarShifted, setToolbarShifted] = useState(false)
   const [folderMenuOpen, setFolderMenuOpen] = useState(false)
   const [fontPanelOpen, setFontPanelOpen] = useState(false)
+  const [formatToolsOpen, setFormatToolsOpen] = useState(false)
+  const formatToolsRef = useRef<HTMLDivElement>(null)
+  const formatToolsTimer = useRef<number | undefined>(undefined)
   const [mobileMenu, setMobileMenu] = useState<'actions' | 'folders' | 'export' | null>(null)
   const mobileMenuRef = useRef<HTMLDialogElement>(null)
+  const mobileMenuOpenRef = useRef(mobileMenu)
+  mobileMenuOpenRef.current = mobileMenu
+  const isMobileRef = useRef(isMobile)
+  isMobileRef.current = isMobile
   const moreButtonRef = useRef<HTMLButtonElement>(null)
 
   const releaseHoldIfIdle = () => {
@@ -127,18 +136,23 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
     burstStart.current = null
     window.clearTimeout(saveTimer.current)
     const noteId = note.id
+    ownWrites.current.push(change.plainText.replace(/\r\n/g, '\n').trimEnd())
+    if (ownWrites.current.length > 20) ownWrites.current.splice(0, ownWrites.current.length - 20)
     beginSave()
-    if (mounted.current) setSaving(true)
+    savingRef.current = true
     const task = writeChain.current.then(async () => {
       try {
         const saved = await onEditRef.current(noteId, change, loadedSeq.current)
         loadedSeq.current = saved.editSeq
       } catch {
+        const failed = change.plainText.replace(/\r\n/g, '\n').trimEnd()
+        const index = ownWrites.current.lastIndexOf(failed)
+        if (index >= 0) ownWrites.current.splice(index, 1)
         if (!pendingChange.current) pendingChange.current = change
       }
     }).finally(() => {
+      savingRef.current = false
       endSave()
-      if (mounted.current) setSaving(false)
       releaseHoldIfIdle()
     })
     writeChain.current = task
@@ -167,13 +181,24 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
     content: withLeadingTitle(note.title, note.doc, note.plainText).doc,
     onUpdate: ({ editor: changed }) => {
       const plainText = changed.getText({ blockSeparator: editorBlockSeparator })
-      setWordCount(plainText.length)
+      wordCountRef.current = plainText.length
+      if (!isMobileRef.current || mobileMenuOpenRef.current) setWordCount(plainText.length)
       enqueue(changed.getJSON() as RichText, plainText)
     },
-    onFocus: () => { onEditingFocusChangeRef.current?.(true) },
-    onBlur: () => {
+    onFocus: () => {
+      window.clearTimeout(formatToolsTimer.current)
+      setFormatToolsOpen(true)
+      onEditingFocusChangeRef.current?.(true)
+    },
+    onBlur: ({ editor: blurred }) => {
       onEditingFocusChangeRef.current?.(false)
       void flushRef.current()
+      window.clearTimeout(formatToolsTimer.current)
+      formatToolsTimer.current = window.setTimeout(() => {
+        if (blurred.isFocused || formatToolsRef.current?.contains(document.activeElement)) return
+        setFormatToolsOpen(false)
+        setFontPanelOpen(false)
+      }, 120)
     },
     editorProps: {
       attributes: { class: 'editor-content', 'aria-label': '便签正文', 'data-placeholder': '开始写点什么' },
@@ -218,6 +243,7 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
     if (!editor) return
     const stored = withLeadingTitle(note.title, note.doc, note.plainText)
     editor.commands.setContent(stored.doc, { emitUpdate: false })
+    wordCountRef.current = stored.plainText.length
     setWordCount(stored.plainText.length)
     loadedSeq.current = note.editSeq
     pendingChange.current = null
@@ -227,19 +253,23 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
 
   useEffect(() => {
     if (!editor) return
-    if (note.editSeq === loadedSeq.current) { setExternalChange(false); return }
     const normalize = (text: string) => text.replace(/\r\n/g, '\n').trimEnd()
-    const editorText = editor.getText({ blockSeparator: editorBlockSeparator })
-    // Same visible text as the store (incl. sync echo): adopt seq, never flash recovery.
-    if (!pendingChange.current && !localError && normalize(editorText) === normalize(note.plainText)) {
-      loadedSeq.current = note.editSeq
+    const stored = normalize(note.plainText)
+    const ownWrite = ownWrites.current.includes(stored)
+    if (note.editSeq === loadedSeq.current || (!localError && (normalize(editor.getText({ blockSeparator: editorBlockSeparator })) === stored || ownWrite))) {
+      if (note.editSeq !== loadedSeq.current) loadedSeq.current = note.editSeq
+      const index = ownWrites.current.lastIndexOf(stored)
+      if (index >= 0) ownWrites.current.splice(0, index + 1)
       setExternalChange(false)
       return
     }
-    if (saving || pendingChange.current || localError || editor.isFocused) { setExternalChange(true); return }
+    // A local autosave must not mount the recovery bar. That bar changes the
+    // editor height on each write and the caret jumps, especially on Android.
+    if (savingRef.current || pendingChange.current || ownWrites.current.length > 0 || editor.isFocused) return
+    if (localError) { setExternalChange(true); return }
     loadStoredVersion()
     onDiscardError()
-  }, [editor, note.editSeq, note.plainText, saving, localError, loadStoredVersion, onDiscardError])
+  }, [editor, note.editSeq, note.plainText, localError, loadStoredVersion, onDiscardError])
 
   useEffect(() => {
     mounted.current = true
@@ -253,6 +283,7 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
       document.removeEventListener('visibilitychange', onHidden)
       window.removeEventListener('pagehide', onPageHide)
       void flushRef.current()
+      window.clearTimeout(formatToolsTimer.current)
       if (holding.current) {
         holding.current = false
         releaseInput()
@@ -277,7 +308,13 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
   useEffect(() => {
     if (!isMobile) return
     const viewport = window.visualViewport
-    const resize = () => document.documentElement.style.setProperty('--mobile-viewport-height', `${viewport?.height ?? window.innerHeight}px`)
+    let applied = 0
+    const resize = () => {
+      const next = Math.round(viewport?.height ?? window.innerHeight)
+      if (applied && Math.abs(next - applied) < 8) return
+      applied = next
+      document.documentElement.style.setProperty('--mobile-viewport-height', `${next}px`)
+    }
     resize()
     viewport?.addEventListener('resize', resize)
     return () => {
@@ -287,6 +324,7 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
   }, [isMobile])
 
   useEffect(() => {
+    if (mobileMenu) setWordCount(wordCountRef.current)
     const dialog = mobileMenuRef.current
     if (mobileMenu && isMobile) {
       if (dialog && !dialog.open) dialog.showModal()
@@ -327,7 +365,7 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
     { label: '撤销', icon: Undo2, action: () => editor?.chain().focus().undo().run() },
     { label: '重做', icon: Redo2, action: () => editor?.chain().focus().redo().run() }
   ]
-  const status = syncUi({ localError: Boolean(localError), externalChange, saving, hasConflict, syncError: Boolean(syncError), pendingCount, syncing, online, lastSyncAt })
+  const status = syncUi({ localError: Boolean(localError), externalChange, hasConflict, syncError: Boolean(syncError), pendingCount, syncing, online, lastSyncAt })
   const hasSaveIssue = Boolean(localError || externalChange || hasConflict || syncError || syncIssueCount)
   const openStatus = () => { if (hasConflict || syncIssueCount > 0) onOpenConflicts(); else onOpenData() }
   const exportNote = (format: NoteExportFormat) => {
@@ -394,7 +432,7 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
         <SyncControls label={status.label} kind={status.kind} issueCount={syncIssueCount} syncing={syncing} onOpenDetails={openStatus} onSync={onManualSync} />
         {hasConflict && <button type="button" className="toolbar-btn recovery-btn" onClick={onOpenConflicts}>处理冲突</button>}
         {syncError && !hasConflict && <button type="button" className="toolbar-btn recovery-btn" onClick={onOpenConflicts}>查看同步问题</button>}
-        {localError && !saving && <button type="button" className="toolbar-btn recovery-btn" onClick={() => {
+        {localError && <button type="button" className="toolbar-btn recovery-btn" onClick={() => {
           if (!editor) return
           enqueue(editor.getJSON() as RichText, editor.getText({ blockSeparator: editorBlockSeparator }))
           void flushRef.current()
@@ -428,15 +466,15 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
       <div className="editor-body">
         <EditorContent editor={editor} className="editor-content-shell" />
       </div>
-      {isMobile && <div className="mobile-editor-tools">
+      {isMobile && formatToolsOpen && <div className="mobile-editor-tools" ref={formatToolsRef}>
         {fontPanelOpen && <div className="mobile-font-panel" role="group" aria-label="字体设置" id="mobile-font-panel">
-          {toolbar.slice(3, 6).map(({ label, icon: Icon, action }) => <button type="button" key={label} aria-label={label} onPointerDown={event => event.preventDefault()} onClick={action}><Icon size={22} /><span>{label}</span></button>)}
-          {toolbar.slice(0, 3).map(({ label, icon: Icon, action }) => <button type="button" key={label} aria-label={label} onPointerDown={event => event.preventDefault()} onClick={action}><Icon size={22} /><span>{label}</span></button>)}
+          {toolbar.slice(3, 6).map(({ label, icon: Icon, action }) => <button type="button" key={label} aria-label={label} onPointerDown={event => event.preventDefault()} onClick={action}><Icon size={18} /><span>{label}</span></button>)}
+          {toolbar.slice(0, 3).map(({ label, icon: Icon, action }) => <button type="button" key={label} aria-label={label} onPointerDown={event => event.preventDefault()} onClick={action}><Icon size={18} /><span>{label}</span></button>)}
         </div>}
         <div className="mobile-bottom-toolbar" role="toolbar" aria-label="常用排版" onKeyDown={handleToolbarKeyDown}>
-          <button type="button" className={fontPanelOpen ? 'active' : ''} aria-label="字体" aria-expanded={fontPanelOpen} aria-controls="mobile-font-panel" onPointerDown={event => event.preventDefault()} onClick={() => setFontPanelOpen(current => !current)}><Type size={24} /></button>
-          {[toolbar[7], toolbar[6], toolbar[8]].map(item => item && <button type="button" key={item.label} aria-label={item.label} onPointerDown={event => event.preventDefault()} onClick={item.action}><item.icon size={24} /></button>)}
-          <button type="button" aria-label="收起键盘和字体面板" onClick={() => { editor?.commands.blur(); setFontPanelOpen(false) }}><ChevronDown size={24} /></button>
+          <button type="button" className={fontPanelOpen ? 'active' : ''} aria-label="字体" aria-expanded={fontPanelOpen} aria-controls="mobile-font-panel" onPointerDown={event => event.preventDefault()} onClick={() => setFontPanelOpen(current => !current)}><Type size={20} /></button>
+          {[toolbar[7], toolbar[6], toolbar[8]].map(item => item && <button type="button" key={item.label} aria-label={item.label} onPointerDown={event => event.preventDefault()} onClick={item.action}><item.icon size={20} /></button>)}
+          <button type="button" aria-label="收起键盘和字体面板" onClick={() => { editor?.commands.blur(); setFontPanelOpen(false) }}><ChevronDown size={20} /></button>
         </div>
       </div>}
       {isMobile && <dialog ref={mobileMenuRef} className="mobile-action-sheet" aria-label={mobileMenu === 'folders' ? '移动到文件夹' : mobileMenu === 'export' ? '导出便签' : '更多便签操作'} onCancel={() => setMobileMenu(null)}>

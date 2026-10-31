@@ -14,12 +14,14 @@ function publish() {
 
 export function beginSave() {
   pendingSaves += 1
-  publish()
+  // Typing already holds the editor. Flipping `pending` on every autosave
+  // re-renders the whole shell and shifts the mobile caret.
+  if (heldCount === 0) publish()
 }
 
 export function endSave() {
   pendingSaves = Math.max(0, pendingSaves - 1)
-  publish()
+  if (heldCount === 0) publish()
 }
 
 export function holdInput() {
