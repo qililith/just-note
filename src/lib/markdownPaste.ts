@@ -335,7 +335,8 @@ function renderInline(tokens: Token[], inherited: Mark[], state: InlineState): R
         pushText(parts, token.text, marks, state)
         break
       case 'codespan':
-        pushText(parts, token.text.replace(/\n+/g, ' '), [...marks, { type: 'code' }], state)
+        // The editor's code mark cannot sit together with bold or italic.
+        pushText(parts, token.text.replace(/\n+/g, ' '), [{ type: 'code' }], state)
         break
       case 'br':
         parts.push({ type: 'hardBreak' })

@@ -93,6 +93,30 @@ describe('markdown paste', () => {
     expect(mixed.content?.[0].content?.some(node => node.marks?.some(mark => mark.type === 'bold'))).toBe(true)
   })
 
+  it('formats an article with emoji headings, a table, and bold list items', () => {
+    const doc = convert(`理解你的顾虑。**核心合规成本可以压缩到每年百元以内**。
+
+### 💰 成本总览：一年到底要花多少？
+
+| 项目 | 最低成本（首年） | 常规/续费成本 | 备注 |
+| :--- | :--- | :--- | :--- |
+| **云服务器** | **38元/年**（秒杀） | 68～99元/年 | 用于生成备案服务码 |
+| **合计** | **约 39 元/首年** | **约 100～150 元/年** | 不含公安备案 |
+
+### 🎯 给你的最低成本路径（如果决定走合规）
+
+1. **抢一台38元/年的轻量服务器**（阿里云或腾讯云），用它生成免费备案服务码。
+2. **注册一个首年1元的 \`.top\` 域名**，完成实名认证。
+
+- **阿里云 PolarDB-X Zero**：免费、MySQL兼容。
+- **腾讯云 CloudBase**：有开发者实测。
+
+**如果你的项目“小范围使用”且会长期运行，合规的最低现金门槛首年不到50元。** 真正需要权衡的不是这几十块钱。`)
+    expect(doc.content?.some(node => node.type === 'heading')).toBe(true)
+    expect(texts(doc)).not.toContain('###')
+    expect(texts(doc)).not.toContain('**')
+  })
+
   it('treats a markdown file as markdown even without syntax, and joins several files', () => {
     const doc = convert('第一行\n第二行', { force: true })
     expect(doc.content?.[0].content?.some(node => node.type === 'hardBreak')).toBe(true)
