@@ -66,17 +66,30 @@ async function writeCursor(db: NoteDatabase, value: string) {
   await db.meta.put({ key: CURSOR_KEY, value })
 }
 
-async function mutationIdFor(db: NoteDatabase, entity: 'note' | 'folder', id: string) {
-  const key = mutationKey(entity, id)
-  const existing = await db.meta.get(key)
-  if (existing?.value) return existing.value
-  const next = crypto.randomUUID()
-  await db.meta.put({ key, value: next })
-  return next
+type MutationRequest = { baseVersion: number; payload: Record<string, unknown> }
+/** request is null for ids stored before requests were recorded alongside them. */
+type PendingMutation = { id: string; request: MutationRequest | null }
+
+async function readPending(db: NoteDatabase, entity: 'note' | 'folder', id: string): Promise<PendingMutation | null> {
+  const raw = (await db.meta.get(mutationKey(entity, id)))?.value
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as Partial<PendingMutation>
+    if (typeof parsed?.id === 'string') return { id: parsed.id, request: parsed.request ?? null }
+  } catch { /* legacy plain id */ }
+  return { id: raw, request: null }
+}
+
+async function writePending(db: NoteDatabase, entity: 'note' | 'folder', id: string, pending: PendingMutation) {
+  await db.meta.put({ key: mutationKey(entity, id), value: JSON.stringify(pending) })
 }
 
 async function clearMutationId(db: NoteDatabase, entity: 'note' | 'folder', id: string) {
   await db.meta.delete(mutationKey(entity, id))
+}
+
+function sameRequest(a: MutationRequest, b: MutationRequest) {
+  return a.baseVersion === b.baseVersion && JSON.stringify(a.payload) === JSON.stringify(b.payload)
 }
 
 async function callPull(client: SyncRpc, after: string, limit = 100): Promise<PullPage> {
@@ -108,7 +121,57 @@ async function callApply(
   return result
 }
 
-async function keepRemoteNoteConflict(db: NoteDatabase, note: NoteRecord, remote: CloudNote) {
+/**
+ * Send one mutation. If an earlier attempt for this entity is still recorded with a different
+ * request, it may have committed without us seeing the reply: replay it first (the server answers
+ * idempotently) so its version is known as ours, then send the current request on top of it.
+ * Reusing the old id for a new request would be rejected by the server forever.
+ */
+async function sendMutation(
+  db: NoteDatabase,
+  client: SyncRpc,
+  entity: 'note' | 'folder',
+  entityId: string,
+  request: MutationRequest
+): Promise<MutationResult> {
+  const pending = await readPending(db, entity, entityId)
+  let current = request
+  if (pending?.request && !sameRequest(pending.request, request)) {
+    const replay = await callApply(client, pending.id, entity, entityId, pending.request.baseVersion, pending.request.payload)
+    await clearMutationId(db, entity, entityId)
+    if (replay.status === 'ok' && replay.record) {
+      const version = asVersion((replay.record as { version: number | string }).version)
+      await (entity === 'note' ? db.notes : db.folders).update(entityId, { serverVersion: version })
+      if (replay.seq) await writeCursor(db, replay.seq)
+      current = { ...request, baseVersion: version }
+    }
+  }
+  const reusable = pending && (pending.request === null || sameRequest(pending.request, current))
+  const id = reusable ? pending.id : crypto.randomUUID()
+  await writePending(db, entity, entityId, { id, request: current })
+  try {
+    return await callApply(client, id, entity, entityId, current.baseVersion, current.payload)
+  } catch (cause) {
+    if (!(pending?.request === null && cause instanceof Error && cause.message.includes('Mutation ID reused'))) throw cause
+    const fresh = crypto.randomUUID()
+    await writePending(db, entity, entityId, { id: fresh, request: current })
+    return callApply(client, fresh, entity, entityId, current.baseVersion, current.payload)
+  }
+}
+
+/** Our recorded-but-unacknowledged upload came back through pull: it is ours, not a conflict. */
+async function isOwnPendingWrite(db: NoteDatabase, local: NoteRecord, remote: CloudNote) {
+  const request = (await readPending(db, 'note', local.id))?.request
+  if (!request || request.baseVersion !== local.serverVersion || asVersion(remote.version) !== request.baseVersion + 1) return false
+  const payload = request.payload as { plainText?: string; folderId?: string | null; isPinned?: boolean; deletedAt?: string | null }
+  return normalizePlain(payload.plainText ?? '') === normalizePlain(remote.plain_text ?? '')
+    && (payload.folderId ?? null) === (remote.folder_id ?? null)
+    && Boolean(payload.isPinned) === Boolean(remote.is_pinned)
+    && (payload.deletedAt == null) === (remote.deleted_at == null)
+}
+
+async function keepRemoteNoteConflict(db: NoteDatabase, note: NoteRecord, remote: CloudNote, reason: string) {
+  console.warn('[just-note] conflict', { noteId: note.id, reason, localVersion: note.serverVersion, remoteVersion: remote.version })
   const version = asVersion(remote.version)
   const snapshot: ConflictRecord = {
     noteId: note.id,
@@ -158,19 +221,27 @@ function sameNoteContent(local: NoteRecord, plainText: string, remote: CloudNote
 }
 
 type ApplyNoteOptions = {
-  /** When false, keep editSeq so a focused editor does not treat echo as「其它窗口已更新」. */
-  bumpEditSeq?: boolean
+  /**
+   * Our own write coming back (push ack or pull echo): keep editSeq so a focused editor does not
+   * see「其它窗口已更新」, and keep any unresolved conflict — our echo does not resolve it.
+   */
+  ownWrite?: boolean
+  /** Only apply if the local row still has this editSeq; otherwise just advance serverVersion. */
+  expectEditSeq?: number
 }
 
 async function applyRemoteNote(db: NoteDatabase, remote: CloudNote, options: ApplyNoteOptions = {}) {
-  const bumpEditSeq = options.bumpEditSeq !== false
   const version = asVersion(remote.version)
   const plainText = remote.plain_text ?? ''
   const title = remote.title || titleFromText(plainText)
   const summary = summaryFromText(plainText)
   await db.transaction('rw', db.notes, db.bodies, db.conflicts, async () => {
     const existing = await db.notes.get(remote.id)
-    const editSeq = bumpEditSeq ? (existing?.editSeq ?? 0) + 1 : (existing?.editSeq ?? 0)
+    if (existing && options.expectEditSeq !== undefined && existing.editSeq !== options.expectEditSeq) {
+      // A newer local save landed while the upload was in flight: keep it and its dirty flag.
+      await db.notes.put({ ...existing, serverVersion: version })
+      return
+    }
     const note: NoteRecord = {
       id: remote.id,
       title,
@@ -182,12 +253,12 @@ async function applyRemoteNote(db: NoteDatabase, remote: CloudNote, options: App
       deletedAt: remote.deleted_at,
       serverVersion: version,
       dirty: 0,
-      editSeq,
-      hasConflict: 0
+      editSeq: options.ownWrite ? (existing?.editSeq ?? 0) : (existing?.editSeq ?? 0) + 1,
+      hasConflict: options.ownWrite ? (existing?.hasConflict ?? 0) : 0
     }
     await db.notes.put(note)
     await db.bodies.put({ id: remote.id, doc: remote.doc ?? emptyDocument, plainText })
-    await db.conflicts.delete(remote.id)
+    if (!options.ownWrite) await db.conflicts.delete(remote.id)
   })
   await clearMutationId(db, 'note', remote.id)
 }
@@ -206,13 +277,19 @@ async function assimilateChange(db: NoteDatabase, item: PullItem, ctx: PullConte
   }
   if (version <= local.serverVersion) return
   const body = await db.bodies.get(remote.id)
-  // Echo of our own upload (or identical remote): adopt metadata without conflict / editSeq bump.
+  // Identical content (including the echo of our own upload): adopt the version, nothing else.
   if (body && sameNoteContent(local, body.plainText, remote)) {
-    await applyRemoteNote(db, remote, { bumpEditSeq: false })
+    await applyRemoteNote(db, remote, { ownWrite: true, expectEditSeq: local.editSeq })
+    return
+  }
+  // Our upload whose reply was lost, and we have typed since: take its version, keep newer local text.
+  if (local.dirty && await isOwnPendingWrite(db, local, remote)) {
+    await db.notes.update(remote.id, { serverVersion: version })
+    await clearMutationId(db, 'note', remote.id)
     return
   }
   if (ctx.editingNoteId === remote.id || local.dirty) {
-    await keepRemoteNoteConflict(db, local, remote)
+    await keepRemoteNoteConflict(db, local, remote, local.dirty ? 'pull: local dirty' : 'pull: editing')
     return
   }
   await applyRemoteNote(db, remote)
@@ -230,11 +307,9 @@ export async function pullChanges(db: NoteDatabase, client: SyncRpc, ctx: PullCo
 }
 
 async function pushFolder(db: NoteDatabase, client: SyncRpc, folder: FolderRecord) {
-  const mutationId = await mutationIdFor(db, 'folder', folder.id)
-  const result = await callApply(client, mutationId, 'folder', folder.id, folder.serverVersion, {
-    name: folder.name,
-    sortOrder: folder.sortOrder,
-    deletedAt: folder.deletedAt
+  const result = await sendMutation(db, client, 'folder', folder.id, {
+    baseVersion: folder.serverVersion,
+    payload: { name: folder.name, sortOrder: folder.sortOrder, deletedAt: folder.deletedAt }
   })
   const remote = result.record as CloudFolder | null
   if (result.status === 'ok' && remote) {
@@ -249,41 +324,33 @@ async function pushFolder(db: NoteDatabase, client: SyncRpc, folder: FolderRecor
 async function pushNote(db: NoteDatabase, client: SyncRpc, note: NoteRecord) {
   const body = await db.bodies.get(note.id)
   if (!body) throw new Error('便签正文缺失')
-  const mutationId = await mutationIdFor(db, 'note', note.id)
-  const result = await callApply(client, mutationId, 'note', note.id, note.serverVersion, {
-    title: note.title,
-    doc: body.doc,
-    docVersion: 1,
-    plainText: body.plainText,
-    folderId: note.folderId,
-    isPinned: note.isPinned,
-    deletedAt: note.deletedAt
+  const result = await sendMutation(db, client, 'note', note.id, {
+    baseVersion: note.serverVersion,
+    payload: {
+      title: note.title,
+      doc: body.doc,
+      docVersion: 1,
+      plainText: body.plainText,
+      folderId: note.folderId,
+      isPinned: note.isPinned,
+      deletedAt: note.deletedAt
+    }
   })
   const remote = result.record as CloudNote | null
   if (result.status === 'ok' && remote) {
-    const latest = await db.notes.get(note.id)
-    // User kept typing while this push was in flight: keep newer local body/dirty, only advance version.
-    if (latest && latest.editSeq > note.editSeq) {
-      await db.notes.update(note.id, { serverVersion: asVersion(remote.version) })
-      await clearMutationId(db, 'note', note.id)
-      if (result.seq) await writeCursor(db, result.seq)
-      return
-    }
-    // Own push ack never bumps editSeq — server echo must not look like「其它窗口已更新」.
-    await applyRemoteNote(db, remote, { bumpEditSeq: false })
+    // Checked inside the write transaction: a save landing during the upload is never overwritten.
+    await applyRemoteNote(db, remote, { ownWrite: true, expectEditSeq: note.editSeq })
+    await clearMutationId(db, 'note', note.id)
     if (result.seq) await writeCursor(db, result.seq)
     return
   }
-  if (remote) {
-    if (sameNoteContent(note, body.plainText, remote)) {
-      await applyRemoteNote(db, remote, { bumpEditSeq: false })
-    } else {
-      await keepRemoteNoteConflict(db, note, remote)
-      await clearMutationId(db, 'note', note.id)
-    }
+  await clearMutationId(db, 'note', note.id)
+  if (!remote) return
+  if (sameNoteContent(note, body.plainText, remote)) {
+    await applyRemoteNote(db, remote, { ownWrite: true, expectEditSeq: note.editSeq })
     return
   }
-  await clearMutationId(db, 'note', note.id)
+  await keepRemoteNoteConflict(db, note, remote, 'push: base version rejected')
 }
 
 export async function pushDirty(db: NoteDatabase, client: SyncRpc) {

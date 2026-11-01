@@ -156,13 +156,16 @@ function NotesWorkspace({ account, onLogout, sessionEnded, onDiscardDraft }: { a
   const notesLoaded = loadedNotes !== undefined
   const notes = useMemo(() => loadedNotes ?? [], [loadedNotes])
   const folders = useLiveQuery(() => db.folders.toArray(), [db], []) ?? []
-  const body = useLiveQuery(() => noteId ? db.bodies.get(noteId) : undefined, [db, noteId])
+  const body = useLiveQuery(() => noteId ? db.transaction('r', db.notes, db.bodies, async () => {
+    const [row, stored] = await Promise.all([db.notes.get(noteId), db.bodies.get(noteId)])
+    return stored && row ? { ...stored, editSeq: row.editSeq } : undefined
+  }) : undefined, [db, noteId])
   const conflictCount = useLiveQuery(() => db.conflicts.count(), [db], 0) ?? 0
   const pendingCount = notes.filter(note => note.dirty).length + folders.filter(folder => folder.dirty).length
   const selectedNote = notes.find(note => note.id === noteId) ?? null
   const keepDeletedOpen = hasUnsavedDraft || saveFlags.pending || saveFlags.held
   const currentRow = selectedNote && (!selectedNote.deletedAt || keepDeletedOpen) ? selectedNote : null
-  const currentNote = currentRow && body?.id === currentRow.id ? { ...currentRow, doc: body.doc, plainText: body.plainText } : null
+  const currentNote = currentRow && body?.id === currentRow.id ? { ...currentRow, editSeq: body.editSeq, doc: body.doc, plainText: body.plainText } : null
   // While the field is focused, ignore the body we just wrote. Feeding it back
   // re-renders the editor on every autosave and the caret jumps on Android.
   const editorNote = (() => {

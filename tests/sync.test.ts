@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import Dexie from 'dexie'
 import { accountDb, deleteAccountDb, emptyDocument } from '../src/lib/db'
 import { createFolder, createNote, saveNoteContent } from '../src/lib/notes'
 import { pullChanges, pushDirty, runManualSync, runSync } from '../src/lib/sync'
@@ -54,6 +55,65 @@ function mockClient(handlers: {
       return { data: null, error: { message: `unknown rpc ${fn}` } }
     }
   }
+}
+
+type FakeNote = ReturnType<typeof noteRecord>
+type FakeResult = { status: 'ok' | 'conflict'; record: FakeNote | null; seq?: string }
+
+/** In-memory twin of apply_mutation / pull_changes: base-version check, per-id idempotency, reuse guard. */
+function fakeServer() {
+  const notes = new Map<string, FakeNote>()
+  const changes: { seq: number; record: FakeNote }[] = []
+  const processed = new Map<string, { request: string; result: FakeResult }>()
+  let lastSeq = 0
+  const server = {
+    notes,
+    dropNextReply: false,
+    beforeApply: null as null | (() => Promise<void>),
+    onPull: null as null | (() => Promise<void>),
+    client: {
+      auth: { getSession: async () => ({ data: { session: { access_token: 't' } } }) },
+      rpc: async (fn: string, args: Record<string, unknown>) => {
+        if (fn === 'pull_changes') {
+          await server.onPull?.()
+          const after = Number(args.p_after)
+          const items = changes.filter(change => change.seq > after).map(change => ({ seq: String(change.seq), entity: 'note', record: change.record }))
+          return { data: { items, next: items.at(-1)?.seq ?? String(args.p_after) }, error: null }
+        }
+        if (fn !== 'apply_mutation') return { data: null, error: { message: `unknown rpc ${fn}` } }
+        if (server.beforeApply) await server.beforeApply()
+        const entityId = String(args.p_entity_id)
+        const base = Number(args.p_base_version)
+        const payload = args.p_payload as { title: string; doc: unknown; plainText: string; folderId: string | null; isPinned: boolean; deletedAt: string | null }
+        const request = JSON.stringify({ entityId, base, payload })
+        const mutationId = String(args.p_mutation_id)
+        const stored = processed.get(mutationId)
+        let result: FakeResult
+        if (stored) {
+          if (stored.request !== request) return { data: null, error: { message: 'Mutation ID reused with different content' } }
+          result = stored.result
+        } else {
+          const current = notes.get(entityId)
+          if ((!current && base === 0) || (current && current.version === base)) {
+            const record = { ...noteRecord(entityId, base + 1, payload.plainText), title: payload.title, folder_id: payload.folderId ?? null, is_pinned: payload.isPinned, deleted_at: payload.deletedAt ?? null }
+            notes.set(entityId, record)
+            lastSeq += 1
+            changes.push({ seq: lastSeq, record })
+            result = { status: 'ok', record, seq: String(lastSeq) }
+          } else {
+            result = { status: 'conflict', record: current ?? null }
+          }
+          processed.set(mutationId, { request, result })
+        }
+        if (server.dropNextReply) {
+          server.dropNextReply = false
+          return { data: null, error: { message: 'network' } }
+        }
+        return { data: result, error: null }
+      }
+    }
+  }
+  return server
 }
 
 describe('sync engine', () => {
@@ -342,6 +402,130 @@ describe('sync engine', () => {
     expect(stored?.dirty).toBe(1)
     expect(stored?.serverVersion).toBe(1)
     expect(stored?.hasConflict).toBe(0)
+  })
+
+  it('ack does not overwrite a save that lands right before the ack is written', async () => {
+    const db = accountDb(userId)
+    const note = await createNote(db, null)
+    await saveNoteContent(db, note.id, { title: 'a', doc: emptyDocument, plainText: 'a' }, 1)
+    const sent = (await db.notes.get(note.id))!
+    let ackPhase = false
+    let typedDuringAck = false
+    // Any read of the note outside a transaction during the ack leaves a window for the
+    // editor's save to land before the ack row is written. Simulate that save there.
+    const originalGet = db.notes.get.bind(db.notes) as (key: string) => Promise<unknown>
+    ;(db.notes as unknown as { get: (key: string) => Promise<unknown> }).get = async (key: string) => {
+      const row = await originalGet(key)
+      if (ackPhase && !typedDuringAck && key === note.id && !Dexie.currentTransaction) {
+        typedDuringAck = true
+        await saveNoteContent(db, note.id, { title: 'ab', doc: emptyDocument, plainText: 'ab' }, sent.editSeq)
+      }
+      return row
+    }
+    const client = mockClient({
+      pull: after => ({ items: [], next: after }),
+      apply: args => {
+        ackPhase = true
+        return { status: 'ok' as const, record: noteRecord(String(args.p_entity_id), 1, 'a'), seq: '1' }
+      }
+    })
+    await pushDirty(db, client)
+    ackPhase = false
+    const body = await db.bodies.get(note.id)
+    const stored = await db.notes.get(note.id)
+    expect(body?.plainText).toBe(typedDuringAck ? 'ab' : 'a')
+    expect(stored?.dirty).toBe(typedDuringAck ? 1 : 0)
+    expect(stored?.serverVersion).toBe(1)
+    expect(stored?.hasConflict).toBe(0)
+  })
+
+  it('typing during the upload keeps the newer text dirty and conflict-free', async () => {
+    const db = accountDb(userId)
+    const note = await createNote(db, null)
+    await saveNoteContent(db, note.id, { title: 'a', doc: emptyDocument, plainText: 'a' }, 1)
+    const sent = (await db.notes.get(note.id))!
+    const client = mockClient({
+      pull: after => ({ items: [], next: after }),
+      apply: async args => {
+        await saveNoteContent(db, note.id, { title: 'ab', doc: emptyDocument, plainText: 'ab' }, sent.editSeq)
+        return { status: 'ok' as const, record: noteRecord(String(args.p_entity_id), 1, 'a'), seq: '1' }
+      }
+    })
+    await pushDirty(db, client)
+    const stored = await db.notes.get(note.id)
+    expect((await db.bodies.get(note.id))?.plainText).toBe('ab')
+    expect(stored?.dirty).toBe(1)
+    expect(stored?.serverVersion).toBe(1)
+    expect(stored?.hasConflict).toBe(0)
+  })
+
+  it('push ack keeps an unresolved local conflict instead of silently discarding it', async () => {
+    const db = accountDb(userId)
+    const note = await createNote(db, null)
+    await saveNoteContent(db, note.id, { title: '本地', doc: emptyDocument, plainText: '本地' }, 1)
+    await db.conflicts.put({ noteId: note.id, title: '另一版', doc: emptyDocument, plainText: '另一版', folderId: null, isPinned: false, serverVersion: 0, updatedAt: '2026-10-02T00:00:00.000Z' })
+    await db.notes.update(note.id, { hasConflict: 1 })
+    const client = mockClient({
+      pull: after => ({ items: [], next: after }),
+      apply: args => ({ status: 'ok' as const, record: noteRecord(String(args.p_entity_id), 1, '本地'), seq: '1' })
+    })
+    await pushDirty(db, client)
+    expect((await db.notes.get(note.id))?.hasConflict).toBe(1)
+    expect((await db.conflicts.get(note.id))?.plainText).toBe('另一版')
+  })
+
+  it('lost push reply + more typing: no self-conflict and no stuck mutation id', async () => {
+    const db = accountDb(userId)
+    const server = fakeServer()
+    const note = await createNote(db, null)
+    await saveNoteContent(db, note.id, { title: 'a', doc: emptyDocument, plainText: 'a' }, 1)
+
+    // Server commits, but the reply never reaches the client.
+    server.dropNextReply = true
+    const first = await runSync(userId, { silent: true, editingNoteId: note.id }, server.client)
+    expect(first.ok).toBe(false)
+
+    const seq = (await db.notes.get(note.id))!.editSeq
+    await saveNoteContent(db, note.id, { title: 'ab', doc: emptyDocument, plainText: 'ab' }, seq)
+
+    const conflictSeen: number[] = []
+    server.onPull = async () => { conflictSeen.push((await db.notes.get(note.id))?.hasConflict ?? 0) }
+    const second = await runSync(userId, { silent: true, editingNoteId: note.id }, server.client)
+    conflictSeen.push((await db.notes.get(note.id))?.hasConflict ?? 0)
+
+    expect(second).toEqual({ ok: true })
+    expect(conflictSeen.every(flag => flag === 0)).toBe(true)
+    expect(await db.conflicts.count()).toBe(0)
+    expect(server.notes.get(note.id)?.plain_text).toBe('ab')
+    const stored = await db.notes.get(note.id)
+    expect(stored?.dirty).toBe(0)
+    expect(stored?.serverVersion).toBe(server.notes.get(note.id)?.version)
+  })
+
+  it('new note → one char → interleaved syncs while focused never flags a conflict', async () => {
+    const db = accountDb(userId)
+    const server = fakeServer()
+    const note = await createNote(db, null)
+    const flags: number[] = []
+    const watch = async () => { flags.push((await db.notes.get(note.id))?.hasConflict ?? 0); flags.push(await db.conflicts.count()) }
+
+    // Empty draft gets pushed before the first keystroke; typing lands during that push.
+    server.beforeApply = async () => {
+      server.beforeApply = null
+      const seq = (await db.notes.get(note.id))!.editSeq
+      await saveNoteContent(db, note.id, { title: 'x', doc: emptyDocument, plainText: 'x' }, seq)
+      await watch()
+    }
+    expect(await runSync(userId, { silent: true, editingNoteId: note.id }, server.client)).toEqual({ ok: true })
+    await watch()
+    expect(await runSync(userId, { silent: true, editingNoteId: note.id }, server.client)).toEqual({ ok: true })
+    await watch()
+    expect(await runSync(userId, { silent: true, editingNoteId: note.id }, server.client)).toEqual({ ok: true })
+    await watch()
+
+    expect(flags.every(flag => flag === 0)).toBe(true)
+    expect(server.notes.get(note.id)?.plain_text).toBe('x')
+    expect((await db.notes.get(note.id))?.dirty).toBe(0)
   })
 
   it('real dual-edit while focused stores conflict without bumping editSeq (t5/t6 engine)', async () => {

@@ -85,6 +85,7 @@ export async function saveNoteContent(
       if (!note || !body) throw new Error('便签不存在')
       let hasConflict = note.hasConflict
       if (note.editSeq !== loadedEditSeq) {
+        console.warn('[just-note] conflict', { noteId: id, reason: 'save: editor based on stale editSeq', stored: note.editSeq, loaded: loadedEditSeq })
         await keepDisplacedVersion(db, note, body)
         hasConflict = 1
       }

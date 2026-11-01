@@ -253,6 +253,8 @@ function EditorBody({ note, folders, onEdit, onSaveCopy, onDiscardError, onMoveF
 
   useEffect(() => {
     if (!editor) return
+    // editSeq only grows; an older row (frozen while focused) must never rewind what our next save is based on.
+    if (note.editSeq < loadedSeq.current) return
     const normalize = (text: string) => text.replace(/\r\n/g, '\n').trimEnd()
     const stored = normalize(note.plainText)
     const ownWrite = ownWrites.current.includes(stored)
