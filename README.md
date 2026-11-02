@@ -1,19 +1,23 @@
 # 只是便签 / Just Note
 
-个人便签。打开先读本机；编辑无条件写入本地；有网时自动同步云端，并提供手动同步。
+个人便签：**本地优先**。打开先读本机；编辑无条件写入本地；有网时自动同步云端，并提供手动同步。冲突时三选，不静默覆盖。
 
 | | |
 |--|--|
+| 在线试用 | [just-note.pages.dev](https://just-note.pages.dev) |
 | 仓库 | [qililith/just-note](https://github.com/qililith/just-note) |
-| Web | [just-note.pages.dev](https://just-note.pages.dev) |
+| 主干 | `master` |
 | 安卓 ID | `com.justnote`（装机后不可改） |
 | 进度 | [docs/进度.md](docs/进度.md) |
+| 许可 | [Apache-2.0](LICENSE) |
 
-本仓库基础文档只有两份：**本 README（需求 + 固定技术路径 + 文档纪律）**，以及 **[docs/进度.md](docs/进度.md)（做到哪）**。
+栈：React + Vite + TipTap · Dexie（本机）· Supabase（同步）· Capacitor（安卓）· PWA。
+
+本仓库基础文档只有两份：**本 README（需求 + 固定技术路径 + 维护约定）**，以及 **[docs/进度.md](docs/进度.md)（做到哪）**。不要另写第三份架构说明。
 
 ---
 
-## 文档纪律（每次对话 / 任务）
+## 维护约定
 
 **先读 README**，当任务涉及：本地保存、同步、冲突、登录与冷启动、云端表/RPC、安卓数据与生命周期、产品范围（导出/导入/历史）。
 
